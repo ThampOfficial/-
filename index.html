@@ -867,7 +867,7 @@ function fx(c){
   if(c===b)return 1;
   const ov=state.settings.fx&&state.settings.fx[c+'_'+b];
   if(ov>0)return +ov;
-  return (DEF_THB[c]||1)/(DEF_THB[base]||1); // <--- จุดที่ผิดตรง DEF_THB[base]
+  return (DEF_THB[c]||1)/(DEF_THB[b]||1);
 }
 const Wt=h=>h._w==null?1:h._w;
 const weighted=hs=>hs.map(h=>Object.assign({},h,{_w:fx(h.ccy)}));
