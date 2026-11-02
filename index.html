@@ -811,7 +811,11 @@ const sgn=n=>n>=0?'+':'−';
 const fmtQ=n=>new Intl.NumberFormat('th-TH',{maximumFractionDigits:4}).format(n||0);
 const pct=n=>NF2.format(n||0)+'%';
 const $=id=>document.getElementById(id);
-const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]);
+const esc = function(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+  });
+};
 const TYPES={bond:'หุ้นกู้',fixed:'เงินฝากประจำ',hy:'ออมทรัพย์ดอกเบี้ยสูง',govt:'พันธบัตร',insurance:'ประกัน',lottery:'สลาก',other:'อื่นๆ'};
 const HV={
   deposit:{types:['fixed','hy','other'],title:'บัญชีเงินฝาก',add:'+ เพิ่มบัญชีเงินฝาก',noun:'บัญชีเงินฝาก',pk:'dep',def:'fixed',placeBtn:'+ เพิ่มธนาคาร / บลจ.',inst:'ธนาคาร / บลจ.'},
