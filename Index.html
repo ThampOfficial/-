@@ -1,0 +1,897 @@
+<!doctype html>
+<html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>สมุดดอกเบี้ย</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Thai:wght@400;500;600&family=Prompt:wght@500;600&display=swap">
+<style>
+/* Layout: passbook ledger. Three tabs (summary / holdings / retirement), double-ruled section heads, mono figures, interest shown in gold. */
+:root{
+  --bg:#f1f3f2; --surface:#fcfdfc; --surface-2:#e8eceb; --ink:#14201f; --muted:#55625f; --line:#d3dad7;
+  --accent:#0e5e63; --accent-ink:#ffffff; --accent-soft:#dcebea;
+  --gold:#8f5a06; --gold-soft:#f3e8d0;
+  --good:#17754a; --good-ink:#ffffff; --bad:#b3261e; --bad-ink:#ffffff;
+  --bar:#0e5e63; --bar-past:#9dbfbd; --bar-now:#b9770b;
+  --font-display:"Prompt","IBM Plex Sans Thai","Noto Sans Thai",system-ui,sans-serif;
+  --font-body:"IBM Plex Sans Thai","Noto Sans Thai",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d1514; --surface:#142120; --surface-2:#1b2c2b; --ink:#e5efed; --muted:#98aaa6; --line:#263836;
+    --accent:#5cc4c0; --accent-ink:#0d1514; --accent-soft:#17383a;
+    --gold:#e2ae55; --gold-soft:#2f2616;
+    --good:#58c58f; --good-ink:#0d1514; --bad:#f08a82; --bad-ink:#0d1514;
+    --bar:#5cc4c0; --bar-past:#2f5a59; --bar-now:#e2ae55;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d1514; --surface:#142120; --surface-2:#1b2c2b; --ink:#e5efed; --muted:#98aaa6; --line:#263836;
+  --accent:#5cc4c0; --accent-ink:#0d1514; --accent-soft:#17383a;
+  --gold:#e2ae55; --gold-soft:#2f2616;
+  --good:#58c58f; --good-ink:#0d1514; --bad:#f08a82; --bad-ink:#0d1514;
+  --bar:#5cc4c0; --bar-past:#2f5a59; --bar-now:#e2ae55;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:15px/1.55 var(--font-body);
+  padding-block:22px 64px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+}
+.shell{max-width:980px;margin:0 auto;min-width:0}
+h1,h2,h3,p{margin:0}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px 24px;border-bottom:1px solid var(--line)}
+.brand{padding-bottom:10px;min-width:0;flex:1 1 auto}
+.who{order:0;align-self:flex-start;margin:4px 0 8px auto}
+.tabs{order:2;flex-basis:100%}
+h1{font:600 26px/1.2 var(--font-display);letter-spacing:.01em}
+.brand p{color:var(--muted);font-size:14px;margin-top:2px}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tab{background:none;border:0;border-bottom:3px solid transparent;padding:10px 12px 9px;color:var(--muted);font-weight:500;margin-bottom:-1px}
+.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab:hover{color:var(--ink)}
+
+#banner:empty{display:none}
+.banner{margin-top:14px;padding:10px 14px;border:1px dashed var(--gold);background:var(--gold-soft);border-radius:6px;display:flex;gap:10px 16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.banner span{min-width:0}
+.banner.note{border-style:solid;border-color:var(--line);background:var(--surface-2)}
+.banner[hidden]{display:none}
+
+.bar-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:20px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;background:var(--surface)}
+.seg button{background:none;border:0;padding:7px 14px;color:var(--muted)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.hint{color:var(--muted);font-size:13px;min-width:0}
+.inline{flex-direction:row!important;align-items:center;gap:8px!important}
+.inline select{width:auto;max-width:100%}
+
+.hero{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:12px;margin-top:14px}
+.hero:empty{display:none}
+.fig{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px 18px;min-width:0}
+.lab{color:var(--muted);font-size:13px}
+.num{font:600 clamp(24px,4.4vw,32px)/1.15 var(--font-display);color:var(--gold);font-variant-numeric:tabular-nums;margin-top:4px;overflow-wrap:anywhere}
+.fig-main .num{font-size:clamp(30px,5.6vw,42px)}
+.sub{color:var(--muted);font-size:13px;margin-top:6px}
+.sub b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+.prog{height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin-top:12px}
+.prog i{display:block;height:100%;background:var(--accent)}
+
+.block{margin-top:30px;min-width:0}
+.block-h{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:3px double var(--line);padding-bottom:6px;margin-bottom:12px}
+h2{font:600 16px/1.3 var(--font-display)}
+h3{font:600 15px/1.3 var(--font-display)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px;min-width:0}
+.card+.card{margin-top:12px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:0 20px}
+
+.yr{display:flex;align-items:center;gap:8px;font:500 14px var(--font-display)}
+.icon-btn{width:30px;height:30px;border:1px solid var(--line);background:var(--surface);border-radius:6px;line-height:1;font-size:18px}
+.icon-btn:hover{border-color:var(--accent)}
+.read{font:500 14px var(--font-body);min-height:22px;margin-bottom:6px;font-variant-numeric:tabular-nums}
+.read b{color:var(--gold);font-family:var(--font-mono);font-weight:500}
+#chart svg{display:block;width:100%;height:auto;overflow:visible}
+.gl{stroke:var(--line);stroke-width:1}
+.ax{fill:var(--muted);font:11px var(--font-mono)}
+.bar{fill:var(--bar)}
+.bar.past{fill:var(--bar-past)}
+.bar.cur{fill:var(--bar-now)}
+.bargrp{cursor:pointer;outline:none}
+.bargrp .hit{fill:transparent}
+.bargrp:hover .bar,.bargrp:focus-visible .bar,.bargrp.sel .bar{stroke:var(--ink);stroke-width:1.5}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:8px;color:var(--muted);font-size:12.5px}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;background:var(--c);vertical-align:-1px}
+
+.ev{display:grid;grid-template-columns:auto 1fr auto;gap:2px 12px;padding:9px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.ev:last-child{border-bottom:0}
+.ev .d{font:500 13px var(--font-mono);color:var(--muted);white-space:nowrap}
+.ev .n{min-width:0;overflow-wrap:anywhere}
+.ev .a{font:500 14px var(--font-mono);color:var(--gold);white-space:nowrap;font-variant-numeric:tabular-nums}
+.ev .a.ret{color:var(--accent)}
+.ev small{display:block;color:var(--muted);font-size:12.5px}
+.empty{color:var(--muted);padding:8px 0}
+
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{font-weight:500;color:var(--muted);font-size:12.5px;text-align:right;padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+td{padding:9px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+td.mono,.mono{font-family:var(--font-mono);font-size:14px}
+tr:last-child td{border-bottom:0}
+tr.target td{background:var(--accent-soft)}
+tr.total td{font-weight:600;border-top:2px solid var(--line)}
+td small{display:block;color:var(--muted);font-size:12px;font-weight:400}
+.meter{display:block;height:4px;background:var(--surface-2);border-radius:2px;margin-top:4px;min-width:64px}
+.meter i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.gold{color:var(--gold)}
+.tag{display:inline-block;font-size:11.5px;padding:0 7px;border-radius:999px;background:var(--accent);color:var(--accent-ink);margin-left:6px;vertical-align:1px;font-weight:400}
+
+.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px 16px;align-items:start}
+label.f,div.f{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);min-width:0}
+input[type=text],input[type=number],input[type=date],select{
+  width:100%;min-width:0;background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:8px 10px;color:var(--ink);
+}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);flex:none}
+.chk{display:flex;gap:8px;align-items:flex-start;font-size:14px;color:var(--ink)}
+.chk small{display:block;color:var(--muted);font-size:12.5px}
+.fxbox{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:10px 16px;margin-top:10px}
+.fxrow{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:14px}
+.fxrow input{flex:1}
+.fxrow span{white-space:nowrap}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:12px;margin-top:20px}
+.btn{background:var(--accent);color:var(--accent-ink);border:1px solid var(--accent);border-radius:6px;padding:8px 16px;font-weight:500}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{background:none;color:var(--ink);border-color:var(--line)}
+.btn.ghost:hover{border-color:var(--accent);filter:none}
+.btn.sm{padding:5px 12px;font-size:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+.form{margin-bottom:14px}
+.form[hidden]{display:none}
+.fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:12px 16px;margin-top:12px;align-items:start}
+.err{color:var(--bad);font-size:14px;margin-top:10px}
+.err:empty{display:none}
+
+.list{padding:0 16px}
+.hold{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 20px;padding:14px 0;border-bottom:1px solid var(--line)}
+.hold:last-child{border-bottom:0}
+.hn{font-weight:600;overflow-wrap:anywhere}
+.chip{display:inline-block;font-size:12px;padding:0 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin-left:6px;vertical-align:1px;font-weight:400}
+.chip.s{border-color:var(--gold);color:var(--gold)}
+.hm{color:var(--muted);font-size:13.5px;margin-top:2px}
+.hm .ok{color:var(--good)}
+.hm b.mono{color:var(--ink);font-weight:500}
+.tops{margin-top:4px;font-size:13.5px;color:var(--muted)}
+.tops summary{cursor:pointer;width:fit-content}
+.trow{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;padding:3px 0 0 14px}
+.trow .mono{color:var(--gold)}
+.hr{text-align:right;min-width:0}
+.hr .big{font:500 17px var(--font-mono);color:var(--gold);font-variant-numeric:tabular-nums}
+.hr .lbl{font-size:12.5px;color:var(--muted)}
+.acts{display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap}
+.link{background:none;border:0;padding:2px 4px;color:var(--accent);font-size:13.5px;text-decoration:underline;text-underline-offset:3px}
+.link.bad{color:var(--bad)}
+
+.status{display:inline-block;padding:2px 12px;border-radius:999px;font-weight:500;font-size:13.5px}
+.status.ok{background:var(--good);color:var(--good-ink)}
+.status.no{background:var(--bad);color:var(--bad-ink)}
+.vhead{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin-bottom:6px}
+.kv{margin:0;display:grid}
+.kv div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 16px;padding:9px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.kv div:last-child{border-bottom:0}
+.kv dt{color:var(--muted);min-width:0}
+.kv dd{margin:0;font:500 15px var(--font-mono);color:var(--gold);text-align:right;font-variant-numeric:tabular-nums}
+.kv dd.n{color:var(--ink)}
+.kv dt small{display:block;font-size:12.5px}
+
+.alerts{display:grid;gap:8px;margin-top:14px}
+.alerts:empty{display:none}
+.alertrow{padding:10px 14px;border-radius:6px;border:1px solid var(--gold);background:var(--gold-soft);font-size:14px;overflow-wrap:anywhere}
+.alertrow.wait{border-color:var(--accent);background:var(--accent-soft)}
+.pos{color:var(--good)}
+.neg{color:var(--bad)}
+.stale{color:var(--bad)}
+.trow .mono.neg{color:var(--bad)}
+.remind{margin-bottom:12px;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-end}
+.remind label.f{width:170px}
+.remind .btn{white-space:normal}
+.hr .pl{font:500 14px var(--font-mono);font-variant-numeric:tabular-nums;margin-top:4px}
+.mini{margin-top:8px}
+.mini th,.mini td{padding:4px 8px;font-size:13px}
+.card.form:not([hidden]){position:fixed;left:50%;top:4vh;transform:translateX(-50%);width:min(720px,calc(100vw - 24px));max-height:92vh;overflow:auto;z-index:60;margin:0;box-shadow:0 0 0 100vmax rgba(0,0,0,.5),0 12px 40px rgba(0,0,0,.3)}
+.fold{background:none;border:0;padding:0 8px 0 0;color:var(--muted);cursor:pointer;font-size:14px;line-height:1}.compact .hn{font-weight:500}.fbar{display:flex;gap:6px;flex-wrap:wrap}details.fbox>summary{cursor:pointer;font-weight:600;font-size:18px;padding:6px 0;list-style:none}details.fbox>summary::before{content:'▸ ';color:var(--muted)}details.fbox[open]>summary::before{content:'▾ '}details.fbox>summary small{font-weight:400;color:var(--muted);font-size:14px;margin-left:8px}.placeblk{border-top:1px solid var(--line,#8884);padding-bottom:4px}.placeblk:first-child{border-top:0}.placeblk>.hold:first-child{font-weight:600}.placeblk .hold~.hold{padding-left:28px}
+a.link{display:inline-block}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));max-width:calc(100% - 32px);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:6px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:20}
+#toast.on{opacity:1}
+
+@media (max-width:760px){
+  .hero{grid-template-columns:1fr}
+  .hold{grid-template-columns:1fr}
+  .hr{text-align:left}
+  .acts{justify-content:flex-start}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <h1>สมุดดอกเบี้ย</h1>
+      <p>ติดตามดอกเบี้ย เงินคืน และแผนเกษียณ</p>
+    </div>
+    <div class="seg who" role="group" aria-label="เลือกผู้ใช้">
+      <button data-act="user" data-u="1" aria-pressed="true">User 1</button><button data-act="user" data-u="2" aria-pressed="false">User 2</button>
+    </div>
+    <div class="tabs" role="tablist" aria-label="เลือกหน้า">
+      <button class="tab" role="tab" id="tabbtn-summary" data-act="tab" data-tab="summary" aria-selected="true">สรุปดอกเบี้ย</button>
+      <button class="tab" role="tab" id="tabbtn-deposits" data-act="tab" data-tab="deposits" aria-selected="false">บัญชีเงินฝาก</button>
+      <button class="tab" role="tab" id="tabbtn-bonds" data-act="tab" data-tab="bonds" aria-selected="false">หุ้นกู้</button>
+      <button class="tab" role="tab" id="tabbtn-govt" data-act="tab" data-tab="govt" aria-selected="false">พันธบัตร</button>
+      <button class="tab" role="tab" id="tabbtn-insurance" data-act="tab" data-tab="insurance" aria-selected="false">ประกัน</button>
+      <button class="tab" role="tab" id="tabbtn-lottery" data-act="tab" data-tab="lottery" aria-selected="false">สลาก</button>
+      <button class="tab" role="tab" id="tabbtn-funds" data-act="tab" data-tab="funds" aria-selected="false">กองทุน / หุ้น</button>
+      <button class="tab" role="tab" id="tabbtn-gold" data-act="tab" data-tab="gold" aria-selected="false">ทอง</button>
+      <button class="tab" role="tab" id="tabbtn-pension" data-act="tab" data-tab="pension" aria-selected="false">บำนาญรัฐ</button>
+      <button class="tab" role="tab" id="tabbtn-retire" data-act="tab" data-tab="retire" aria-selected="false">วางแผนเกษียณ</button>
+    </div>
+  </header>
+
+  <div id="banner"></div>
+  <div id="alerts" class="alerts"></div>
+
+  <section id="tab-summary" role="tabpanel" aria-labelledby="tabbtn-summary">
+    <div class="bar-row">
+      <label class="f inline" for="scope" id="scopeWrap">แสดง
+        <select id="scope"></select>
+      </label>
+      <div class="seg" role="group" aria-label="วิธีนับดอกเบี้ย">
+        <button data-act="mode" data-mode="accrual" aria-pressed="true">สะสมรายวัน</button>
+        <button data-act="mode" data-mode="cash" aria-pressed="false">เงินเข้าจริงตามวันจ่าย</button>
+      </div>
+    </div>
+    <p class="hint" id="modeHint" style="margin-top:8px"></p>
+
+    <div id="cards" class="hero"></div>
+
+    <section class="block">
+      <div class="block-h"><h2>แยกตามสกุลเงิน</h2></div>
+      <div id="byCcy" class="card tw"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-h">
+        <h2>ดอกเบี้ยรายเดือน</h2>
+        <div class="yr">
+          <button class="icon-btn" data-act="yprev" aria-label="ปีก่อนหน้า">‹</button>
+          <span id="yrLabel"></span>
+          <button class="icon-btn" data-act="ynext" aria-label="ปีถัดไป">›</button>
+        </div>
+      </div>
+      <div class="card">
+        <div id="chartRead" class="read" aria-live="polite"></div>
+        <div id="chart"></div>
+        <div class="legend">
+          <span style="--c:var(--bar-past)">เดือนที่ผ่านมาแล้ว</span>
+          <span style="--c:var(--bar-now)">เดือนนี้</span>
+          <span style="--c:var(--bar)">ยังไม่ถึง</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-h">
+        <h2>ดอกเบี้ยรายปี</h2>
+        <div class="seg" role="group" aria-label="จำนวนปีที่แสดง">
+          <button data-act="yspan" data-n="5" aria-pressed="false">5 ปี</button><button data-act="yspan" data-n="10" aria-pressed="true">10 ปี</button><button data-act="yspan" data-n="20" aria-pressed="false">20 ปี</button><button data-act="yspan" data-n="30" aria-pressed="false">30 ปี</button>
+        </div>
+      </div>
+      <div class="card">
+        <div id="yRead" class="read"></div>
+        <div id="chartY"></div>
+        <p class="hint" id="yNote" style="margin-top:6px"></p>
+        <details class="tops"><summary>ดูตัวเลขรายปี</summary><div id="yTbl" class="tw"></div></details>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-h"><h2>เงินต้นที่จะได้คืน เรียงตามวัน</h2></div>
+      <div id="returns" class="card"></div>
+    </section>
+
+    <div class="two">
+      <section class="block">
+        <div class="block-h"><h2>งวดที่จะถึงใน 12 เดือน</h2></div>
+        <div id="upcoming" class="card"></div>
+      </section>
+      <section class="block">
+        <div class="block-h"><h2>แยกตามประเภท</h2></div>
+        <div id="byType" class="card tw"></div>
+      </section>
+    </div>
+  </section>
+
+  <section id="tab-holdings" role="tabpanel" aria-labelledby="tabbtn-deposits" hidden>
+    <div class="stats" id="holdStats"></div>
+
+    <div class="block">
+      <div class="block-h">
+        <h2 id="holdTitle">บัญชีเงินฝาก</h2>
+        <div class="row" style="margin:0"><button class="btn ghost" data-act="foldall" data-v="closed">ย่อทั้งหมด</button><button class="btn ghost" data-act="foldall" data-v="open">ขยายทั้งหมด</button><button class="btn ghost" data-act="xfer">โยกเงิน</button><button class="btn ghost" id="addHoldPlace" data-act="addplace">+ เพิ่มธนาคาร / บลจ.</button><button class="btn" id="addHold" data-act="add">+ เพิ่มบัญชีเงินฝาก</button></div>
+      </div>
+
+      <div class="card remind">
+        <label class="f" for="s-lead">เตือนก่อนครบกำหนด (วัน)
+          <input type="number" id="s-lead" min="0" max="365" step="1" inputmode="numeric">
+        </label>
+        <button class="btn ghost" data-act="expcal">บันทึกวันเตือนลงปฏิทิน (CSV)</button>
+        <p class="hint" style="flex:1 1 260px">แอปแสดงแถบเตือนเมื่อคุณเปิดหน้านี้ แต่ส่งอีเมลเองไม่ได้ ถ้าต้องการอีเมลหรือแจ้งเตือนบนมือถือ ให้นำไฟล์ CSV นี้เข้า Google Calendar (Settings → Import) แล้วปฏิทินจะเตือนตามที่ตั้งไว้ ไฟล์สร้างวันหาตัวใหม่ วันครบกำหนด และวันเช็คเงินเข้า (+3 วัน)</p>
+      </div>
+
+      <form id="xferForm" class="card form" hidden novalidate>
+        <h3>โยกเงินระหว่างรายการ</h3>
+        <div class="fgrid">
+          <label class="f" for="x-from">จากรายการ<select id="x-from"></select></label>
+          <label class="f" for="x-to">ไปรายการ<select id="x-to"></select></label>
+          <label class="f" for="x-out"><span id="x-out-lbl">จำนวนที่โยก</span> <span id="x-out-ccy"></span>
+            <input type="number" id="x-out" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" id="x-w-in" for="x-in">จำนวนที่เข้า (ยอดที่ได้รับจริง) <span id="x-in-ccy"></span>
+            <input type="number" id="x-in" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" for="x-date">วันที่โยก<input type="date" id="x-date"></label>
+        </div>
+        <p class="hint" id="xHint" style="margin-top:8px"></p>
+        <p class="err" id="xErr" role="alert"></p>
+        <div class="row">
+          <button class="btn" type="submit">โยกเงิน</button>
+          <button class="btn ghost" type="button" data-act="cancelx">ยกเลิก</button>
+        </div>
+      </form>
+
+      <form id="holdForm" class="card form" hidden novalidate>
+        <h3 id="formTitle">เพิ่มรายการ</h3>
+        <div class="fgrid">
+          <label class="f" for="f-name">ชื่อรายการ
+            <input type="text" id="f-name" placeholder="เช่น หุ้นกู้ ABC ครั้งที่ 2/2569" autocomplete="off">
+          </label>
+          <label class="f" for="f-type">ประเภทบัญชี
+            <select id="f-type">
+              <option value="bond">หุ้นกู้</option>
+              <option value="fixed">เงินฝากประจำ</option>
+              <option value="hy">ออมทรัพย์ดอกเบี้ยสูง</option>
+              <option value="govt">พันธบัตร</option>
+              <option value="other">อื่นๆ</option>
+            </select>
+          </label>
+          <label class="f" for="f-ccy">สกุลเงิน
+            <select id="f-ccy"></select>
+          </label>
+          <label class="f" for="f-principal">เงินต้น
+            <input type="number" id="f-principal" min="0" step="any" inputmode="decimal">
+          </label>
+          <label class="f" for="f-rate">ดอกเบี้ย (% ต่อปี)
+            <input type="number" id="f-rate" min="0" step="0.01" inputmode="decimal">
+          </label>
+          <label class="f" for="f-start">วันเริ่มต้น
+            <input type="date" id="f-start">
+          </label>
+          <div class="f">
+            <label class="f" for="f-end">วันครบกำหนด
+              <input type="date" id="f-end">
+            </label>
+            <label class="chk" for="f-perp" style="margin-top:6px">
+              <input type="checkbox" id="f-perp"><span>ไม่มีวันครบกำหนด (ตลอดไป)</span>
+            </label>
+          </div>
+          <label class="f" for="f-freq">จ่ายดอกเบี้ย
+            <select id="f-freq">
+              <option value="12">รายเดือน</option>
+              <option value="4">รายไตรมาส</option>
+              <option value="2">ราย 6 เดือน</option>
+              <option value="1">รายปี</option>
+              <option value="0">จ่ายตอนครบกำหนด</option>
+            </select>
+          </label>
+          <label class="f" for="f-tax">หักภาษี ณ ที่จ่าย (%)
+            <input type="number" id="f-tax" min="0" max="100" step="0.1" inputmode="decimal" placeholder="0 = ดูก่อนหักภาษี">
+          </label>
+          <label class="chk" for="f-compound">
+            <input type="checkbox" id="f-compound">
+            <span>ทบต้น<small>ดอกเบี้ยอยู่ในบัญชีต่อ ไม่ถูกถอนออก</small></span>
+          </label>
+          <label class="f" for="f-broker">ซื้อกับ (บลจ. / ธนาคาร / ผู้ออก)
+            <input type="text" id="f-broker" autocomplete="off">
+          </label>
+          <label class="f" for="f-acct">เงินเข้าบัญชี (ดอกเบี้ยและเงินต้น)
+            <input type="text" id="f-acct" placeholder="ชื่อธนาคาร + เลขท้าย 4 ตัว" autocomplete="off">
+          </label>
+          <label class="f" for="f-acctp">เงินต้นเข้าอีกบัญชี (ถ้าต่างกัน)
+            <input type="text" id="f-acctp" placeholder="เว้นว่างถ้าเข้าบัญชีเดียวกัน" autocomplete="off">
+          </label>
+          <label class="f" for="f-note">หมายเหตุ
+            <input type="text" id="f-note" autocomplete="off">
+          </label>
+        </div>
+        <p class="err" id="formErr" role="alert"></p>
+        <div class="row">
+          <button class="btn" type="submit">บันทึก</button>
+          <button class="btn ghost" type="button" data-act="cancelform">ยกเลิก</button>
+        </div>
+      </form>
+
+      <form id="topForm" class="card form" hidden novalidate>
+        <h3 id="topTitle">เติมเงิน</h3>
+        <div class="fgrid">
+          <label class="f" for="f-top-kind">ประเภทรายการ
+            <select id="f-top-kind"><option value="in">เติมเงิน</option><option value="out">ถอนเงิน</option></select>
+          </label>
+          <label class="f" for="f-top-amt">จำนวนเงิน
+            <input type="number" id="f-top-amt" min="0" step="any" inputmode="decimal">
+          </label>
+          <label class="f" for="f-top-date">วันที่ใส่เงิน
+            <input type="date" id="f-top-date">
+          </label>
+        </div>
+        <p class="hint" style="margin-top:8px">เติมเงิน: ดอกเบี้ยของเงินก้อนนี้เริ่มนับจากวันที่ที่เลือก ถอนเงิน: ดอกเบี้ยของเงินก้อนที่ถอนหยุดนับจากวันที่ที่เลือก</p>
+        <p class="err" id="topErr" role="alert"></p>
+        <div class="row">
+          <button class="btn" type="submit">บันทึก</button>
+          <button class="btn ghost" type="button" data-act="canceltop">ยกเลิก</button>
+        </div>
+      </form>
+
+      <div id="list" class="card list"></div>
+    </div>
+  </section>
+
+  <section id="tab-sched" role="tabpanel" aria-labelledby="tabbtn-insurance" hidden>
+    <div class="stats" id="schedStats"></div>
+    <div class="block">
+      <div class="block-h">
+        <h2 id="schedTitle">ประกัน</h2>
+        <div class="row" style="margin:0"><button class="btn ghost" data-act="foldall" data-v="closed">ย่อทั้งหมด</button><button class="btn ghost" data-act="foldall" data-v="open">ขยายทั้งหมด</button><button class="btn ghost" id="addSchedPlace" data-act="addplace">+ เพิ่มบริษัทประกัน</button><button class="btn" id="addSched" data-act="addss">+ เพิ่มกรมธรรม์</button></div>
+      </div>
+      <p class="hint" id="schedNote" style="margin-bottom:10px"></p>
+
+      <form id="ssForm" class="card form" hidden novalidate>
+        <h3 id="ssTitle">เพิ่มกรมธรรม์</h3>
+        <div class="fgrid">
+          <label class="f" for="s2-name">ชื่อ<input type="text" id="s2-name" autocomplete="off"></label>
+          <label class="f" for="s2-broker"><span id="s2-broker-lbl">บริษัทประกัน</span><input type="text" id="s2-broker" autocomplete="off"></label>
+          <label class="f" for="s2-ccy">สกุลเงิน<select id="s2-ccy"></select></label>
+          <label class="f" for="s2-principal"><span id="s2-principal-lbl">เบี้ยประกันที่จ่ายรวม</span><input type="number" id="s2-principal" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" for="s2-start">วันเริ่มต้น<input type="date" id="s2-start"></label>
+          <label class="f" for="s2-end">วันครบกำหนด / วันรับเงินต้นคืน (เว้นว่างถ้าไม่มี)<input type="date" id="s2-end"></label>
+          <label class="f" id="s2-w-prem" for="s2-prem">เบี้ยต่อปี (ไว้ดูเฉยๆ)<input type="number" id="s2-prem" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" id="s2-w-premend" for="s2-premend">จ่ายเบี้ยถึงวันที่ (ถ้ามี)<input type="date" id="s2-premend"></label>
+          <label class="f" for="s2-acct">เงินเข้าบัญชี<input type="text" id="s2-acct" placeholder="ชื่อธนาคาร + เลขท้าย 4 ตัว" autocomplete="off"></label>
+          <label class="f" for="s2-note">หมายเหตุ<input type="text" id="s2-note" autocomplete="off"></label>
+        </div>
+        <div id="s2-build">
+          <h3 id="s2-build-h" style="margin-top:14px">เงินที่จะได้รับ</h3>
+          <div class="fgrid">
+            <label class="f" for="s2-ret"><span id="s2-ret-lbl">เงินต้นที่ได้คืนตอนครบกำหนด</span><input type="number" id="s2-ret" min="0" step="any" inputmode="decimal"></label>
+            <label class="f" for="s2-bfirst">งวดระหว่างทาง: วันที่ได้รับครั้งแรก<input type="date" id="s2-bfirst"></label>
+            <label class="f" for="s2-bamt">งวดละ (จำนวนเงิน)<input type="number" id="s2-bamt" min="0" step="any" inputmode="decimal"></label>
+            <label class="f" for="s2-bevery">ได้รับทุกๆ<select id="s2-bevery"><option value="12">ปีละครั้ง</option><option value="6">ทุก 6 เดือน</option><option value="3">ทุก 3 เดือน</option><option value="1">ทุกเดือน</option></select></label>
+            <label class="f" for="s2-bcount">รวมกี่งวด<input type="number" id="s2-bcount" min="1" step="1" inputmode="numeric" value="1"></label>
+            <label class="f" for="s2-bkind">งวดระหว่างทางนับเป็น<select id="s2-bkind"><option value="i">ดอกเบี้ย / ผลตอบแทน / เงินปันผล</option><option value="p">เงินต้นคืนบางส่วน</option></select></label>
+          </div>
+          <p class="hint" style="margin-top:6px">เว้นช่องงวดระหว่างทางว่างได้ ถ้ามีหลายแบบ เพิ่มทีหลังได้จากปุ่ม "+ เพิ่มงวดรับเงิน" ในรายการ</p>
+        </div>
+        <p class="err" id="ssErr" role="alert"></p>
+        <div class="row"><button class="btn" type="submit">บันทึก</button><button class="btn ghost" type="button" data-act="cancelss">ยกเลิก</button></div>
+      </form>
+
+      <form id="payForm" class="card form" hidden novalidate>
+        <h3 id="payTitle">เพิ่มงวดรับเงิน</h3>
+        <div class="fgrid">
+          <label class="f" for="pay-kind">ประเภท<select id="pay-kind"><option value="i">ดอกเบี้ย / ผลตอบแทน / รางวัล</option><option value="p">เงินต้นคืน</option></select></label>
+          <label class="f" for="pay-date">วันที่ได้รับ (อนาคตได้)<input type="date" id="pay-date"></label>
+          <label class="f" for="pay-amt">จำนวนเงิน<input type="number" id="pay-amt" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" for="pay-note">หมายเหตุ<input type="text" id="pay-note" autocomplete="off"></label>
+        </div>
+        <p class="err" id="payErr" role="alert"></p>
+        <div class="row"><button class="btn" type="submit">บันทึก</button><button class="btn ghost" type="button" data-act="cancelpay">ยกเลิก</button></div>
+      </form>
+
+      <div id="schedList" class="card list"></div>
+    </div>
+  </section>
+
+  <section id="tab-pension" role="tabpanel" aria-labelledby="tabbtn-pension" hidden>
+    <div class="stats" id="penStats"></div>
+    <div class="block">
+      <div class="block-h">
+        <h2>เงินบำนาญที่จะได้จากรัฐบาล</h2>
+        <div class="row" style="margin:0"><button class="btn ghost" data-act="foldall" data-v="closed">ย่อทั้งหมด</button><button class="btn ghost" data-act="foldall" data-v="open">ขยายทั้งหมด</button><button class="btn ghost" data-act="addplace">+ เพิ่มประเทศ</button><button class="btn" data-act="addpen">+ เพิ่มบำนาญ</button></div>
+      </div>
+      <p class="hint" style="margin-bottom:10px">ใส่เงินที่คาดว่าจะได้ต่อเดือน เป็นมูลค่าเงินวันนี้ (เช่น ประกันสังคมไทย, CPP/OAS แคนาดา, Social Security สหรัฐ) และอายุที่เริ่มได้ ระบบจะนำไปหักจากเงินที่ต้องเก็บในหน้าวางแผนเกษียณ โดยสมมติว่าปรับขึ้นตามเงินเฟ้อ ตัวเลขจริงดูได้จากเว็บหรือใบแจ้งของแต่ละประเทศ</p>
+      <form id="penForm" class="card form" hidden novalidate>
+        <h3 id="penTitle">เพิ่มบำนาญ</h3>
+        <div class="fgrid">
+          <label class="f" for="pn-type">รูปแบบที่ได้รับ<select id="pn-type"><option value="m">รายเดือน (บำนาญ)</option><option value="l">ก้อนเดียว (บำเหน็จ)</option></select></label>
+          <label class="f" for="pn-name">ชื่อบำนาญ<input type="text" id="pn-name" placeholder="เช่น ประกันสังคม, CPP, OAS" autocomplete="off"></label>
+          <label class="f" for="pn-country">ประเทศ<input type="text" id="pn-country" list="penCountries" autocomplete="off"><datalist id="penCountries"></datalist></label>
+          <label class="f" for="pn-ccy">สกุลเงิน<select id="pn-ccy"></select></label>
+          <label class="f" for="pn-amt"><span id="pn-amt-lbl">ได้เดือนละ (มูลค่าเงินวันนี้)</span><input type="number" id="pn-amt" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" for="pn-age"><span id="pn-age-lbl">เริ่มได้ตอนอายุ (ปี)</span><input type="number" id="pn-age" min="30" max="110" step="1" inputmode="numeric"></label>
+          <label class="f" for="pn-note">หมายเหตุ<input type="text" id="pn-note" autocomplete="off"></label>
+        </div>
+        <p class="err" id="penErr" role="alert"></p>
+        <div class="row"><button class="btn" type="submit">บันทึก</button><button class="btn ghost" type="button" data-act="cancelpen">ยกเลิก</button></div>
+      </form>
+      <div id="penList" class="card list"></div>
+    </div>
+  </section>
+
+  <section id="tab-assets" role="tabpanel" aria-labelledby="tabbtn-funds" hidden>
+    <div class="stats" id="assetStats"></div>
+    <div class="block">
+      <div class="block-h">
+        <h2 id="assetTitle">ทอง</h2>
+        <div class="row" style="margin:0"><button class="btn ghost" data-act="foldall" data-v="closed">ย่อทั้งหมด</button><button class="btn ghost" data-act="foldall" data-v="open">ขยายทั้งหมด</button><button class="btn ghost" id="addAssetPlace" data-act="addplace">+ เพิ่มแอป / ร้านทอง</button><button class="btn" id="addAsset" data-act="addasset">+ เพิ่มสินทรัพย์</button></div>
+      </div>
+      <p class="hint" id="assetNote" style="margin-bottom:10px"></p>
+
+      <form id="placeForm" class="card form" hidden novalidate>
+        <h3 id="placeFormTitle">เพิ่มที่ซื้อ</h3>
+        <div class="fgrid">
+          <label class="f" for="p-name"><span id="p-lbl">ชื่อแอป / ร้าน / บลจ. / บล.</span><input type="text" id="p-name" autocomplete="off"></label>
+        </div>
+        <p class="err" id="pErr" role="alert"></p>
+        <div class="frow" style="display:flex;gap:10px;margin-top:14px"><button class="btn" type="submit">เพิ่ม</button><button class="btn ghost" type="button" data-act="cancelplace">ยกเลิก</button></div>
+      </form>
+
+      <form id="assetForm" class="card form" hidden novalidate>
+        <h3 id="assetFormTitle">เพิ่มสินทรัพย์</h3>
+        <div class="fgrid">
+          <label class="f" for="a-mode">วิธีบันทึก
+            <select id="a-mode"><option value="units">ระบุจำนวนหน่วยและราคา (หุ้น ทอง กองทุนที่ซื้อเป็นหน่วย)</option><option value="sum">สรุปเป็นเงิน (กองทุนที่ซื้อยิบย่อย ใส่แค่เงินลงทุนต่อ บลจ.)</option></select></label>
+          <label class="f" for="a-name">ชื่อ / สัญลักษณ์
+            <input type="text" id="a-name" placeholder="เช่น PTT, กองทุน XYZ, ทองคำแท่ง" autocomplete="off"></label>
+          <label class="f" for="a-kind">ประเภท
+            <select id="a-kind"><option value="stock">หุ้น</option><option value="fund">กองทุน</option><option value="gold">ทอง</option></select></label>
+          <label class="f" for="a-ccy">สกุลเงิน<select id="a-ccy"></select></label>
+          <label class="f" id="a-w-unit" for="a-unit">หน่วยที่นับ
+            <input type="text" id="a-unit" placeholder="หุ้น / หน่วย / กรัม / บาททอง" autocomplete="off"></label>
+          <label class="f" for="a-price"><span id="a-price-lbl">ราคาล่าสุดต่อหน่วย</span>
+            <input type="number" id="a-price" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" for="a-broker">ที่ซื้อหลัก (บล. / บลจ. / ร้านทอง)
+            <input type="text" id="a-broker" autocomplete="off"></label>
+          <label class="f" for="a-acct">เงินขายและปันผลเข้าบัญชี
+            <input type="text" id="a-acct" placeholder="ชื่อธนาคาร + เลขท้าย 4 ตัว" autocomplete="off"></label>
+        </div>
+        <div id="a-first">
+          <h3 style="margin-top:16px">ซื้อครั้งแรก (ใส่ย้อนหลังได้)</h3>
+          <p class="hint" style="margin-top:4px">ใส่ถ้าซื้อไปแล้ว ถ้าซื้อหลายครั้งให้ใส่ครั้งแรกตรงนี้ แล้วกด "+ ซื้อ" ที่รายการเพื่อเพิ่มครั้งต่อไป เว้นว่างได้ถ้ายังไม่ได้ซื้อ</p>
+          <div class="fgrid">
+            <label class="f" for="a-fdate">วันที่ซื้อ<input type="date" id="a-fdate"></label>
+            <label class="f" for="a-fqty"><span id="a-fqty-lbl">จำนวนที่ซื้อ</span><input type="number" id="a-fqty" min="0" step="any" inputmode="decimal"></label>
+            <label class="f" id="a-w-fprice" for="a-fprice">ราคาที่ซื้อต่อหน่วย<input type="number" id="a-fprice" min="0" step="any" inputmode="decimal"></label>
+            <label class="f" id="a-w-ffee" for="a-ffee">ค่าธรรมเนียม (ถ้ามี)<input type="number" id="a-ffee" min="0" step="any" inputmode="decimal"></label>
+          </div>
+        </div>
+        <p class="err" id="aErr" role="alert"></p>
+        <div class="row">
+          <button class="btn" type="submit">บันทึก</button>
+          <button class="btn ghost" type="button" data-act="cancelasset">ยกเลิก</button>
+        </div>
+      </form>
+
+      <form id="tradeForm" class="card form" hidden novalidate>
+        <h3 id="tradeTitle">บันทึกรายการ</h3>
+        <div class="fgrid">
+          <label class="f" for="t-type">รายการ
+            <select id="t-type">
+              <option value="buy">ซื้อเข้า</option><option value="sell">ขายออก</option>
+              <option value="div">รับเงินปันผล</option><option value="price">อัปเดตราคาล่าสุด</option>
+            </select></label>
+          <label class="f" for="t-date"><span id="t-date-lbl">วันที่</span><input type="date" id="t-date"></label>
+          <label class="f" id="t-w-qty" for="t-qty">จำนวน
+            <input type="number" id="t-qty" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" id="t-w-price" for="t-price"><span id="t-price-lbl">ราคาต่อหน่วย</span>
+            <input type="number" id="t-price" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" id="t-w-fee" for="t-fee">ค่าธรรมเนียม (ถ้ามี)
+            <input type="number" id="t-fee" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" id="t-w-amt" for="t-amt" hidden><span id="t-amt-lbl">เงินปันผลที่ได้รับ</span>
+            <input type="number" id="t-amt" min="0" step="any" inputmode="decimal"></label>
+          <label class="f" id="t-w-src" for="t-src"><span id="t-src-lbl">ซื้อกับที่ไหน</span><input type="text" id="t-src" list="srcList" autocomplete="off"></label>
+          <datalist id="srcList"></datalist>
+          <label class="f" for="t-note">หมายเหตุ<input type="text" id="t-note" autocomplete="off"></label>
+        </div>
+        <p class="err" id="tErr" role="alert"></p>
+        <div class="row">
+          <button class="btn" type="submit">บันทึก</button>
+          <button class="btn ghost" type="button" data-act="canceltrade">ยกเลิก</button>
+        </div>
+      </form>
+
+      <div id="assetByCcy" class="card tw"></div>
+      <div id="assetList" class="card list"></div>
+    </div>
+  </section>
+
+  <section id="tab-retire" role="tabpanel" aria-labelledby="tabbtn-retire" hidden>
+    <section class="block" style="margin-top:20px">
+      <details class="fbox" id="retSettings">
+      <summary>ข้อมูลสำหรับวางแผน<small id="retSum"></small></summary>
+      <div class="card settings" style="margin-top:8px">
+        <label class="f" for="s-birth">วันเกิด
+          <input type="date" id="s-birth">
+        </label>
+        <label class="f" for="s-retire">เกษียณตอนอายุ (ปี)
+          <input type="number" id="s-retire" min="1" max="120" step="1" inputmode="numeric">
+        </label>
+        <label class="f" for="s-life">คาดว่าจะอยู่ถึงอายุ (ปี)
+          <input type="number" id="s-life" min="1" max="130" step="1" inputmode="numeric">
+        </label>
+        <label class="f" for="s-spend">อยากใช้เดือนละ (<span id="spendCcy">THB</span>)
+          <input type="number" id="s-spend" min="0" step="any" inputmode="decimal">
+        </label>
+        <label class="f" for="s-infl">เงินเฟ้อ (% ต่อปี)
+          <input type="number" id="s-infl" min="0" max="30" step="0.1" inputmode="decimal">
+        </label>
+        <label class="f" for="s-rate">ผลตอบแทนหลังเกษียณ (% ต่อปี)
+          <input type="number" id="s-rate" min="0" max="30" step="0.01" inputmode="decimal">
+        </label>
+        <label class="f" for="s-base">สกุลเงินหลัก
+          <select id="s-base"></select>
+        </label>
+        <label class="f" for="s-step">ตารางด้านล่างดูทุกๆ (ปี)
+          <input type="number" id="s-step" min="1" max="30" step="1" inputmode="numeric">
+        </label>
+        <label class="f" for="s-mcase">ตัวเลขหลักนับหุ้น กองทุน ทอง ที่
+          <select id="s-mcase"><option value="none">ไม่นับ</option><option value="low">กรณีแย่</option><option value="base">กรณีกลาง</option><option value="high">กรณีดี</option></select>
+        </label>
+        <label class="f" for="s-mlow">หุ้น/กองทุน/ทอง กรณีแย่ (% ต่อปี)
+          <input type="number" id="s-mlow" min="-50" max="50" step="0.1" inputmode="decimal">
+        </label>
+        <label class="f" for="s-mbase">หุ้น/กองทุน/ทอง กรณีกลาง (% ต่อปี)
+          <input type="number" id="s-mbase" min="-50" max="50" step="0.1" inputmode="decimal">
+        </label>
+        <label class="f" for="s-mhigh">หุ้น/กองทุน/ทอง กรณีดี (% ต่อปี)
+          <input type="number" id="s-mhigh" min="-50" max="50" step="0.1" inputmode="decimal">
+        </label>
+        <label class="chk" for="s-ro">
+          <input type="checkbox" id="s-ro">
+          <span>ต่ออายุอัตราเดิมเมื่อครบกำหนด<small>ถ้าไม่ติ๊ก เงินต้นที่ครบกำหนดจะกลับมาและไม่ได้ดอกเบี้ยต่อ</small></span>
+        </label>
+      </div>
+      <div class="card">
+        <h3>อัตราแลกเปลี่ยนเป็น <span id="fxBaseLbl">THB</span></h3>
+        <p class="hint" style="margin-top:4px">ใช้แปลงทุกสกุลเงินมารวมกัน ช่องว่างหมายถึงใช้ค่าประมาณที่แสดงในช่อง ซึ่งไม่ใช่เรทจริง ณ วันนี้ ควรใส่เรทที่คุณใช้จริงทับ</p>
+        <div id="fxBox" class="fxbox"></div>
+      </div>
+      </details>
+    </section>
+
+    <div id="retNeed" class="banner note" hidden></div>
+    <div id="retHero" class="hero"></div>
+
+    <section class="block" id="retEarlyBlock">
+      <div class="block-h"><h2>เกษียณได้เร็วสุดตอนอายุเท่าไหร่</h2></div>
+      <div id="retEarly" class="card"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-h"><h2 id="hVerdict">เป้าหมายการใช้จ่าย</h2></div>
+      <div id="retVerdict" class="card"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-h"><h2 id="hWealth">เงินทั้งหมดตอนเกษียณ แยกตามสกุลเงิน</h2></div>
+      <div id="wealthTbl" class="card tw"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-h"><h2>รวมหุ้น กองทุน ทอง (ราคาขึ้นลง) ดู 3 กรณี</h2></div>
+      <div id="scenTbl" class="card tw"></div>
+      <p class="hint" id="scenNote" style="margin-top:8px"></p>
+    </section>
+
+    <section class="block">
+      <div class="block-h"><h2 id="hProj">คาดการณ์ตามช่วงอายุ</h2></div>
+      <div class="card tw"><div id="proj"></div></div>
+      <p class="hint" id="projNote" style="margin-top:8px"></p>
+    </section>
+  </section>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function(){
+'use strict';
+
+/*CORE-START*/
+const DAY=86400000;
+const MS=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+const ymdDay=(y,m,d)=>Date.UTC(y,m,d)/DAY;
+const isoRe=/^(\d{4})-(\d{2})-(\d{2})$/;
+function toDay(s){const m=isoRe.exec(s||'');return m?ymdDay(+m[1],+m[2]-1,+m[3]):NaN;}
+function dt(day){return new Date(day*DAY);}
+function isoOf(day){const d=dt(day);return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');}
+function todayDay(){const n=new Date();return ymdDay(n.getFullYear(),n.getMonth(),n.getDate());}
+function fmtDate(day){const d=dt(day);return d.getUTCDate()+' '+MS[d.getUTCMonth()]+' '+(d.getUTCFullYear()+543);}
+function addMonths(day,k,anchor){
+  const d=dt(day);const y=d.getUTCFullYear(),m=d.getUTCMonth()+k;
+  const dim=new Date(Date.UTC(y,m+1,0)).getUTCDate();
+  return ymdDay(y,m,Math.min(anchor,dim));
+}
+let CTX={ro:false,T:0};
+function prep(h){
+  const s=toDay(h.start);if(!Number.isFinite(s))return null;
+  let e=(h.perpetual||!h.end)?null:toDay(h.end);
+  if(!Number.isFinite(e))e=null;
+  const fq=Number(h.freq);
+  return {id:h.id,name:h.name||'',type:h.type||'other',ccy:h.ccy||'THB',principal:+h.principal||0,rate:+h.rate||0,tax:+h.tax||0,
+    freq:Number.isFinite(fq)?fq:0,compound:!!h.compound,note:h.note||'',broker:h.broker||'',acct:h.acct||'',acctp:h.acctp||'',received:h.received||'',start:h.start,end:h.end||'',
+    perpetual:e==null,sample:!!h.sample,_s:s,_a:s,_e:e,
+    topups:(Array.isArray(h.topups)?h.topups:[]).map(t=>({d:t.d,a:+t.a||0,n:t.n||'',day:toDay(t.d)})).filter(t=>t.a!==0&&Number.isFinite(t.day)),
+    ss:(h.type==='insurance'||h.type==='lottery'),prem:+h.prem||0,premEnd:h.premEnd||'',
+    sched:(Array.isArray(h.sched)?h.sched:[]).map(x=>({d:x.d,a:+x.a||0,k:x.k==='p'?'p':'i',n:x.n||'',day:toDay(x.d)})).filter(x=>x.a>0&&Number.isFinite(x.day)).sort((u,v)=>u.day-v.day)};
+}
+/* each top-up becomes its own tranche that starts earning on its own date; payment dates stay anchored to the account's start (_a) */
+function expand(hs){
+  const out=[];
+  for(const h of hs){
+    out.push(h);
+    for(const t of h.topups||[])out.push(Object.assign({},h,{principal:t.a,_s:t.day,_a:h._s,topups:[],_top:true}));
+  }
+  return out;
+}
+function rolls(h,nr){return !nr&&CTX.ro&&h._e!=null&&h._e>CTX.T;}
+/* net interest accrued from the holding's start date up to day t, in the holding's own currency */
+function cum(h,t,nr){
+  if(h.ss)return h.sched.reduce((s,x)=>s+(x.k==='i'&&x.day<=t?x.a:0),0);
+  let end=t;
+  if(h._e!=null&&!rolls(h,nr))end=Math.min(t,h._e);
+  if(end<=h._s)return 0;
+  const yrs=(end-h._s)/365,r=h.rate/100,m=h.freq>0?h.freq:1;
+  const g=h.compound?h.principal*(Math.pow(1+r/m,m*yrs)-1):h.principal*r*yrs;
+  return g*(1-h.tax/100);
+}
+/* cash interest payments on or before day `until` */
+function payments(h,until,nr){
+  if(h.ss)return h.sched.filter(x=>x.k==='i'&&x.day<=until).map(x=>({day:x.day,amount:x.a}));
+  const out=[],E=h._e,finite=E!=null&&!rolls(h,nr);
+  if(h.compound){if(finite&&E<=until)out.push({day:E,amount:cum(h,E,nr)});return out;}
+  const f=h.freq>0?h.freq:(finite?0:1);
+  if(f===0){if(finite&&E<=until)out.push({day:E,amount:cum(h,E,nr)});return out;}
+  const a0=h._a!=null?h._a:h._s,step=12/f,anchor=dt(a0).getUTCDate();let prev=h._s;
+  for(let k=1;k<2000;k++){
+    const d=addMonths(a0,k*step,anchor);
+    if(d<=h._s)continue;
+    if(finite&&d>=E){if(E<=until)out.push({day:E,amount:cum(h,E,nr)-cum(h,prev,nr)});break;}
+    if(d>until)break;
+    out.push({day:d,amount:cum(h,d,nr)-cum(h,prev,nr)});prev=d;
+  }
+  return out;
+}
+function nominalYear(h){
+  if(h.ss)return h.sched.reduce((s,x)=>s+(x.k==='i'&&x.day>CTX.T&&x.day<=CTX.T+365?x.a:0),0);
+  const r=h.rate/100,m=h.freq>0?h.freq:1;
+  return (h.compound?h.principal*(Math.pow(1+r/m,m)-1):h.principal*r)*(1-h.tax/100);
+}
+/* Retirement maths in today's money. W = total at retirement, g = yearly return, f = inflation,
+   n = months until retirement, N = months of retirement, S = wanted spending per month (today's money). */
+function retireCalc(p){
+  const W=p.W,g=p.g,f=p.f,n=p.n,N=p.N,S=p.S,pv=p.pv||0;
+  const mr=Math.pow((1+g)/(1+f),1/12)-1;
+  const Wr=W/Math.pow(1+f,n/12);
+  const ann=(i,k)=>i===0?k:(1-Math.pow(1+i,-k))/i;
+  const fva=(i,k)=>i===0?k:(Math.pow(1+i,k)-1)/i;
+  const interestOnly=Math.max(0,Wr*mr);
+  const sustain=Wr/ann(mr,N);
+  /* state pensions cover part of the spending: what the savings must pay is S minus the level-equivalent pension */
+  const pAvg=N>0?pv/ann(mr,N):0,Sx=Math.max(0,S-pAvg);
+  const need=Sx*ann(mr,N);
+  const gap=need-Wr;
+  let monthly=0,lump=0,runOut=null,left=null;
+  if(gap>0){monthly=n>0?gap/fva(mr,n):gap;lump=gap/Math.pow(1+mr,Math.max(0,n));}
+  if(S>0){
+    if(gap<=0)left=Wr*Math.pow(1+mr,N)-Sx*fva(mr,N);
+    else if(mr===0)runOut=Wr/Sx;
+    else{const x=1-Wr*mr/Sx;runOut=x<=0?Infinity:-Math.log(x)/Math.log(1+mr);}
+  }
+  return {mr,Wr,interestOnly,sustain,need,gap,monthly,lump,runOut,left,pAvg,Sx};
+}
+/*CORE-END*/
+
+const NF=new Intl.NumberFormat('th-TH',{maximumFractionDigits:0});
+const NF2=new Intl.NumberFormat('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+const SYM={THB:'฿',USD:'US$',CAD:'C$',EUR:'€',GBP:'£',JPY:'¥',SGD:'S$',CNY:'CN¥',AUD:'A$',HKD:'HK$'};
+const CCY_NAME={THB:'บาท',USD:'ดอลลาร์สหรัฐ',CAD:'ดอลลาร์แคนาดา',EUR:'ยูโร',GBP:'ปอนด์สเตอร์ลิง',JPY:'เยน',SGD:'ดอลลาร์สิงคโปร์',CNY:'หยวน',AUD:'ดอลลาร์ออสเตรเลีย',HKD:'ดอลลาร์ฮ่องกง'};
+/* Rough THB per 1 unit, used only until the user types real rates. USD and CAD were spot-checked; the rest are approximate. */
+const DEF_THB={THB:1,USD:33.73,CAD:24.15,EUR:37.68,GBP:45.19,JPY:0.2145,SGD:26.39,CNY:5.07,AUD:23.69,HKD:4.30};
+const CCYS=Object.keys(DEF_THB);
+let DISP='THB';
+const money=(n,c,dp)=>{const k=c||DISP;return (SYM[k]||k+' ')+(dp?NF2.format(n||0):NF.format(Math.round(n)||0));};
+const sgn=n=>n>=0?'+':'−';
+const fmtQ=n=>new Intl.NumberFormat('th-TH',{maximumFractionDigits:4}).format(n||0);
+const pct=n=>NF2.format(n||0)+'%';
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const TYPES={bond:'หุ้นกู้',fixed:'เงินฝากประจำ',hy:'ออมทรัพย์ดอกเบี้ยสูง',govt:'พันธบัตร',insurance:'ประกัน',lottery:'สลาก',other:'อื่นๆ'};
+const HV={
+  deposit:{types:['fixed','hy','other'],title:'บัญชีเงินฝาก',add:'+ เพิ่มบัญชีเงินฝาก',noun:'บัญชีเงินฝาก',pk:'dep',def:'fixed',placeBtn:'+ เพิ่มธนาคาร / บลจ.',inst:'ธนาคาร / บลจ.'},
+  bond:{types:['bond'],title:'หุ้นกู้ที่ลงทุนไว้',add:'+ เพิ่มหุ้นกู้',noun:'หุ้นกู้',pk:'bond',def:'bond',placeBtn:'+ เพิ่มผู้ออก / ผู้จัดจำหน่าย',inst:'ผู้ออก / ผู้จัดจำหน่าย'},
+  govt:{types:['govt'],title:'พันธบัตรที่ลงทุนไว้',add:'+ เพิ่มพันธบัตร',noun:'พันธบัตร',pk:'govt',def:'govt',placeBtn:'+ เพิ่มสถาบัน',inst:'ธนาคาร / สถาบัน'}
+};
+const SV={
+  ins:{type:'insurance',title:'ประกัน',add:'+ เพิ่มกรมธรรม์',noun:'กรมธรรม์',pk:'ins',placeBtn:'+ เพิ่มบริษัทประกัน',inst:'บริษัทประกัน',amt:'เบี้ยประกันที่จ่ายรวม'},
+  lot:{type:'lottery',title:'สลาก',add:'+ เพิ่มสลาก',noun:'สลาก',pk:'lot',placeBtn:'+ เพิ่มธนาคาร / ผู้ออกสลาก',inst:'ธนาคาร / ผู้ออกสลาก',amt:'เงินที่ซื้อสลาก'}
+};
+const NOINST='ไม่ระบุสถาบัน';
+const isSched=h=>h.type==='insurance'||h.type==='lottery';
+/* fold state: key -> true/false; foldDef decides keys never touched */
+const isFold=k=>(k in state.fold)?state.fold[k]:state.foldDef==='closed';
+const foldBtn=k=>'<button class="fold" data-act="fold" data-k="'+esc(k)+'" aria-expanded="'+(!isFold(k))+'" aria-label="ย่อหรือขยายรายการนี้">'+(isFold(k)?'▸':'▾')+'</button>';
+const compactRow=(k,name,chips,val)=>'<div class="hold compact"><div style="min-width:0"><div class="hn">'+foldBtn(k)+name+chips+'</div></div><div class="hr"><div class="big" style="font-size:16px">'+val+'</div></div></div>';
+function placeKey(){return {pension:'pen',deposits:'dep',bonds:'bond',govt:'govt',insurance:'ins',lottery:'lot',funds:'funds',gold:'gold'}[state.tab]||'gold';}
+/* groups: by[name]={n,sub,html:[],stored}; ordered list of names */
+function renderGroups(ctx,by,order,o){
+  return order.map(k=>{
+    const g=by[k],has=g.html.length>0,fk='p:'+ctx+':'+k,fold=isFold(fk);
+    const hdr='<div class="hold" style="align-items:center"><div style="min-width:0"><div class="hn">'+foldBtn(fk)+esc(k)+'<span class="chip">'+(has?g.n+' รายการ':'ยังว่าง')+'</span></div>'+
+      '<div class="hm">'+g.sub+'</div></div>'+
+      '<div class="hr"><div class="acts" style="margin-top:0">'+(o.sample?'':
+        '<button class="link" data-act="'+o.addAct+'" data-place="'+esc(k)+'">+ เพิ่ม'+o.addWord+'ที่นี่</button>'+
+        (!has&&g.stored?(state.confirmPlace===k?'<button class="link bad" data-act="pdelok" data-place="'+esc(k)+'">ยืนยันลบ</button><button class="link" data-act="pdelcancel">ยกเลิก</button>':'<button class="link bad" data-act="pdel" data-place="'+esc(k)+'">ลบที่นี่</button>'):''))+'</div></div></div>';
+    return '<div class="placeblk">'+hdr+(fold?'':(has?g.html.join(''):'<p class="hint" style="padding:6px 16px 12px">ยังไม่มี'+o.addWord+'ที่นี่ กดปุ่ม "เพิ่ม" ด้านบนของที่นี่</p>'))+'</div>';
+  }).join('');
+}
+const PLACE_LBL={pen:['เพิ่มประเทศ','ชื่อประเทศ เช่น ไทย แคนาดา'],gold:['เพิ่มแอป / ร้านทอง','ชื่อแอปหรือร้านทอง'],funds:['เพิ่มบลจ. / บล. / แอป','ชื่อ บลจ. / บล. / แอป'],dep:['เพิ่มธนาคาร / บลจ.','ชื่อธนาคารหรือ บลจ.'],bond:['เพิ่มผู้ออก / ผู้จัดจำหน่าย','ชื่อผู้ออกหรือผู้จัดจำหน่าย'],govt:['เพิ่มสถาบัน','ชื่อธนาคารหรือสถาบันที่ซื้อ'],ins:['เพิ่มบริษัทประกัน','ชื่อบริษัทประกัน'],lot:['เพิ่มธนาคาร / ผู้ออกสลาก','ชื่อธนาคารหรือผู้ออกสลาก']};
+const FREQ={12:'รายเดือน',4:'รายไตรมาส',2:'ราย 6 เดือน',1:'รายปี',0:'จ่ายตอนครบกำหนด'};
+const TYPE_DEF={bond:{freq:4,compound:false},fixed:{freq:0,compound:false},hy:{freq:4,compound:true},govt:{freq:2,compound:false},other:{freq:1,compound:false}};
+const LS_BASE='interest-ledger-v1';
+const lsKey=()=>state.profile>1?LS_BASE+'-p'+state.profile:LS_BASE;
+const PROF_KEY='interest-ledger-profile';
+
+const state={
+  holdings:[],assets:[],holdView:'deposit',schedView:'ins',assetView:'gold',fold:{},foldDef:'open',ySpan:10,placeCtx:'gold',confirmAsset:null,confirmEnt:null,assetEditId:null,tradeId:null,
+  settings:null,
+  _unused:{birth:'',targetAge:60,lifeAge:85,spend:50000,infl:0,retRate:0,base:'THB',step:10,rollover:false,mktLow:0,mktBase:4,mktHigh:8,mktCase:'base',lead:30,fx:{},places:{gold:[],funds:[],dep:[],bond:[],govt:[],ins:[],lot:[]}},
+  mode:'accrual',scope:'ALL',year:new Date().getFullYear(),sel:null,tab:'summary',
+  storage:'pending',confirmed:false,timeout:false,editingId:null,confirmDel:null,confirmTop:null,topId:null,lastCcy:null
+};
+const defaultSettings=()=>({birth:'',targetAge:60,lifeAge:85,spend:50000,infl:0,retRate:0,base:'THB',step:10,rollover:false,mktLow:0,mktBase:4,mktHigh:8,mktCase:'base',lead:30,fx:{},pensions:[],places:{gold:[],funds:[],dep:[],bond:[],govt:[],ins:[],lot:[],pen:[]}});
+state.settings=defaultSettings();delete state._unused;
+state.profile=1;
+let store=null,toastTimer=null,delTimer=null;
+
+/* ---------- currency ---------- */
+function fx(c){
+  const b=state.settings.base;
+  if(c===b)return 1;
+  const ov=state.settings.fx&&state.settings.fx[c+'_'+b];
+  if(ov>0)return +ov;
+  return (DEF_THB[c]||1)/(DEF_THB[b]||1);
+}
+const Wt=h=>h._w==null?1:h._w;
+const weighted=hs=>hs.map(h=>Object.assign({},h,{_w:fx(h.ccy)}));
+function usedCcys(hs){return [...new Set(hs.map(h=>h.ccy))];}
+
+/* ---------- data ---------- */
+function samples(T){
+  const a=dt(T).getUTCDate();
+  return [
+    {id:'s1',sample:true,name:'หุ้นกู้ตัวอย่าง A',broker:'ผู้ออกตัวอย่าง',acct:'ธนาคารตัวอย่าง ออมทรัพย์ เลขท้าย 1234',type:'bond',ccy:'THB',principal:300000,rate:5.6,start:isoOf(addMonths(T,-8,a)),end:isoOf(addMonths(T,28,a)),freq:4,compound:false,tax:0},
+    {id:'s2',sample:true,name:'เงินฝากประจำตัวอย่าง',type:'fixed',ccy:'THB',principal:150000,rate:2.4,start:isoOf(addMonths(T,-2,a)),end:isoOf(addMonths(T,10,a)),freq:0,compound:false,tax:0},
+    {id:'s3',sample:true,name:'ออมทรัพย์ดอกเบี้ยสูงตัวอย่าง',type:'hy',ccy:'THB',principal:100000,rate:2.0,start:isoOf(addMonths(T,-5,a)),end:'',perpetual:true,freq:4,compound:true,tax:0,topups:[{d:isoOf(addMonths(T,-1,a)),a:20000}]},
+    {id:'s5',sample:true,name:'ประกันสะสมทรัพย์ตัวอย่าง',type:'insurance',broker:'บริษัทประกันตัวอย่าง',acct:'ธนาคารตัวอย่าง ออมทรัพย์ เลขท้าย 1234',ccy:'THB',principal:120000,rate:0,start:isoOf(addMonths(T,-18,a)),end:isoOf(addMonths(T,102,a)),freq:0,compound:false,tax:0,prem:60000,
+      sched:[{d:isoOf(addMonths(T,6,a)),a:3000,k:'i'},{d:isoOf(addMonths(T,18,a)),a:3000,k:'i'},{d:isoOf(addMonths(T,30,a)),a:3000,k:'i'},{d:isoOf(addMonths(T,102,a)),a:150000,k:'p'}]},
+    {id:'s6',sample:true,name:'สลากออมทรัพย์ตัวอย่าง',type:'lottery',broker:'ธนาคารตัวอย่าง',acct:'ธนาคารตัวอย่าง ออมทรัพย์ เลขท้าย 1234',ccy:'THB',principal:100000,rate:0,start:isoOf(addMonths(T,-4,a)),end:isoOf(addMonths(T,8,a)),freq:0,compound:false,tax:0,
+      sched:[{d:isoOf(addMonths(T,-2,a)),a:500,k:'i',n:'ถูกรางวัล'},{d:isoOf(addMonths(T,8,a)),a:100000,k:'p'}]},
+    {id:'s4',sample:true,name:'เงินฝากดอลลาร์ตัวอย่าง',type:'fixed',ccy:'USD',principal:10000,rate:4.0,start:isoOf(addMonths(T,-3,a)),end:isoOf(addMonths(T,21,a)),freq:12,compound:false,tax:0}
+  ];
+}
+function list(T){
+  const raw=isSample()?samples(T):state.holdings;
+  const hs=raw.map(prep).filter(Boolean);
+  hs.sort((x,y)=>(x._e==null?1e12:x._e)-(y._e==null?1e12:y._e)||x._s-
