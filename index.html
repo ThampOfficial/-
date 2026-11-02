@@ -894,4 +894,1581 @@ function samples(T){
 function list(T){
   const raw=isSample()?samples(T):state.holdings;
   const hs=raw.map(prep).filter(Boolean);
-  hs.sort((x,y)=>(x._e==null?1e12:x._e)-(y._e==null?1e12:y._e)||x._s-
+  hs.sort((x,y)=>(x._e==null?1e12:x._e)-(y._e==null?1e12:y._e)||x._s-y._s);
+  return hs;
+}
+const hasPlaces=ks=>ks.some(k=>((state.settings.places||{})[k]||[]).length>0);
+const isSample=()=>state.holdings.length===0&&!hasPlaces(['dep','bond','govt','ins','lot']);
+const assetsSample=()=>state.assets.length===0&&!hasPlaces(['gold','funds']);
+const isActive=(h,T)=>h._e==null||h._e>T;
+
+function loadLocal(){
+  try{const j=JSON.parse(localStorage.getItem(lsKey())||'null');if(j){state.holdings=j.holdings||[];state.assets=j.assets||[];Object.assign(state.settings,j.settings||{});}}catch(e){}
+}
+function saveLocal(){
+  try{localStorage.setItem(lsKey(),JSON.stringify({holdings:state.holdings,assets:state.assets,settings:state.settings}));}catch(e){}
+}
+async function persistSettings(){
+  if(store&&store.kind==='db'){
+    try{await store.app.set(JSON.parse(JSON.stringify(state.settings)));}catch(e){toast('บันทึกการตั้งค่าไม่สำเร็จ');}
+  }else saveLocal();
+}
+async function saveHolding(obj,id){
+  if(store&&store.kind==='db'){
+    const ref=id?store.col.doc(id):store.col.doc();
+    await ref.set(obj);
+  }else{
+    if(id){const i=state.holdings.findIndex(h=>h.id===id);if(i>=0)state.holdings[i]=Object.assign({id},obj);}
+    else state.holdings.push(Object.assign({id:'h'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)},obj));
+    saveLocal();
+  }
+}
+async function removeHolding(id){
+  if(store&&store.kind==='db'){await store.col.doc(id).delete();}
+  else{state.holdings=state.holdings.filter(h=>h.id!==id);saveLocal();}
+}
+
+let CAP={db:null,uid:null},attachTok=0,unsubs=[];
+function normSettings(){
+  const st=state.settings;
+  if(!st.fx||typeof st.fx!=='object')st.fx={};
+  if(!st.places||typeof st.places!=='object')st.places={};
+  if(!Array.isArray(st.pensions))st.pensions=[];
+}
+function attach(){
+  const tok=++attachTok;
+  unsubs.forEach(u=>{try{u();}catch(e){}});unsubs=[];
+  const live=()=>tok===attachTok;
+  if(CAP.db&&CAP.uid){
+    state.storage='db';
+    const app=CAP.db.doc('data/users/'+CAP.uid+'/'+(state.profile>1?'app'+state.profile:'app'));
+    const col=app.collection('holdings');
+    store={kind:'db',app,col,acol:app.collection('assets')};
+    const keep=u=>{if(typeof u==='function')unsubs.push(u);};
+    keep(store.acol.onSnapshot(snap=>{
+      if(!live())return;
+      state.assets=snap.docs.map(d=>Object.assign({},d.data(),{id:d.id}));
+      renderAll();
+    },()=>{}));
+    const timer=setTimeout(()=>{if(live()&&!state.confirmed){state.timeout=true;renderAll();}},10000);
+    keep(col.onSnapshot(snap=>{
+      if(!live())return;
+      state.holdings=snap.docs.map(d=>Object.assign({},d.data(),{id:d.id}));
+      if(!snap.metadata.fromCache){state.confirmed=true;clearTimeout(timer);}
+      renderAll();
+    },()=>{if(live()){state.timeout=true;renderAll();}}));
+    keep(app.onSnapshot(snap=>{
+      if(!live())return;
+      if(snap.exists){Object.assign(state.settings,snap.data()||{});normSettings();}
+      syncSettings();renderAll();
+    },()=>{}));
+  }else{
+    store=null;state.storage='local';state.confirmed=true;
+    loadLocal();normSettings();syncSettings();renderAll();
+  }
+}
+async function init(){
+  try{const pv=parseInt(localStorage.getItem(PROF_KEY)||'1',10);if(pv===2)state.profile=2;}catch(e){}
+  renderAll();
+  try{
+    if(window.claude&&window.claude.use){
+      const r=await Promise.all([window.claude.use('db'),window.claude.use('user')]);
+      CAP.db=r[0];
+      try{CAP.uid=r[1]?await r[1].id():null;}catch(e){}
+    }
+  }catch(e){}
+  attach();
+}
+function switchUser(n){
+  n=n===2?2:1;
+  if(n===state.profile)return;
+  closeAllForms();
+  state.profile=n;
+  try{localStorage.setItem(PROF_KEY,String(n));}catch(e){}
+  state.holdings=[];state.assets=[];state.settings=defaultSettings();
+  state.confirmed=false;state.timeout=false;state.scope='ALL';state.fold={};state.sel=null;
+  retOpened=false;
+  attach();
+}
+
+/* ---------- aggregation (all amounts multiplied by the holding's weight _w: 1 = own currency, fx = converted) ---------- */
+function amountIn(h,a,b){
+  if(b<=a)return 0;
+  let v=0;
+  if(state.mode==='accrual')v=cum(h,b)-cum(h,a);
+  else{for(const p of payments(h,b-1)){if(p.day>=a&&p.day<b)v+=p.amount;}}
+  return v*Wt(h);
+}
+const sumIn=(hs,a,b)=>hs.reduce((s,h)=>s+amountIn(h,a,b),0);
+function monthBuckets(hs,y){
+  const arr=new Array(12).fill(0);
+  for(const h of hs){
+    const w=Wt(h);
+    if(state.mode==='accrual'){
+      for(let m=0;m<12;m++)arr[m]+=(cum(h,ymdDay(y,m+1,1))-cum(h,ymdDay(y,m,1)))*w;
+    }else{
+      for(const p of payments(h,ymdDay(y+1,0,1)-1)){const d=dt(p.day);if(d.getUTCFullYear()===y)arr[d.getUTCMonth()]+=p.amount*w;}
+    }
+  }
+  return arr;
+}
+const niceStep=raw=>{const p=Math.pow(10,Math.floor(Math.log10(raw)));const n=raw/p;return (n<=1?1:n<=2?2:n<=5?5:10)*p;};
+
+/* ---------- render ---------- */
+function renderAll(){
+  const T=todayDay();
+  CTX={ro:!!state.settings.rollover,T};
+  const hs=list(T);
+  const calc=expand(hs);
+  const used=usedCcys(hs);
+  const usedAll=[...new Set(used.concat(listAssets(T).map(a=>a.ccy||'THB')))];
+  const base=state.settings.base;
+  renderScope(used);
+  if(state.scope!=='ALL'&&!used.includes(state.scope))state.scope='ALL';
+  renderBanner();
+  renderAlerts(hs,T);
+
+  /* summary: scoped */
+  let sc;
+  if(state.scope==='ALL'){DISP=base;sc=weighted(calc);}
+  else{DISP=state.scope;sc=calc.filter(h=>h.ccy===state.scope).map(h=>Object.assign({},h,{_w:1}));}
+  renderCards(sc,T);
+  renderChart(sc,T);
+  renderYearChart(sc,T);
+  renderUpcoming(sc,T);
+  renderReturns(hs,T);
+  renderByType(sc,T);
+  DISP=base;
+  renderByCcy(calc,T);
+
+  /* holdings + retirement: always converted to base */
+  DISP=base;
+  const all=weighted(calc);
+  renderHoldings(hs,all,T,calc);
+  renderAssets(T);
+  renderSched(hs,T);
+  renderPension(T);
+  renderFx(usedAll);
+  renderRetire(all,T);
+  renderScen(T);
+
+  $('modeHint').textContent=state.mode==='accrual'
+    ?'นับดอกเบี้ยที่เกิดขึ้นทุกวัน ตามจำนวนวันจริง'
+    :'นับเฉพาะวันที่ดอกเบี้ยเข้าบัญชี รายการทบต้นจะนับตอนครบกำหนด';
+  document.querySelectorAll('[data-act="mode"]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===state.mode)));
+  $('yrLabel').textContent='ปี '+(state.year+543);
+  document.querySelectorAll('[data-act="user"]').forEach(b=>b.setAttribute('aria-pressed',String(+b.dataset.u===state.profile)));
+}
+
+function renderScope(used){
+  const sel=$('scope'),base=state.settings.base;
+  const sig=base+'|'+used.slice().sort().join(',');
+  if(sel.dataset.sig!==sig){
+    sel.innerHTML='<option value="ALL">ทุกสกุลเงิน (แปลงเป็น '+base+')</option>'+
+      used.slice().sort().map(c=>'<option value="'+c+'">'+c+' · '+CCY_NAME[c]+'</option>').join('');
+    sel.dataset.sig=sig;
+  }
+  if(state.scope!=='ALL'&&!used.includes(state.scope))state.scope='ALL';
+  sel.value=state.scope;
+  $('scopeWrap').hidden=used.length===1&&used[0]===base;
+}
+
+function renderBanner(){
+  let h='';
+  if(isSample()){
+    if(state.storage==='pending'||(state.storage==='db'&&!state.confirmed&&!state.timeout)){
+      h+='<div class="banner"><span>กำลังโหลดข้อมูลของคุณ ระหว่างนี้แสดงตัวอย่างไปก่อน</span></div>';
+    }else{
+      h+='<div class="banner"><span><b>นี่คือข้อมูลตัวอย่าง</b> ตัวเลขยังไม่ใช่ของคุณ เพิ่มรายการแรกแล้วตัวอย่างจะหายไป</span><button class="btn sm" data-act="add">เพิ่มรายการแรก</button></div>';
+    }
+  }
+  if(state.storage==='local'){
+    h+='<div class="banner note"><span>ยังไม่ได้เชื่อมต่อที่เก็บข้อมูล ข้อมูลถูกเก็บในเบราว์เซอร์นี้เท่านั้น ถ้าล้างข้อมูลเบราว์เซอร์ ข้อมูลจะหาย</span></div>';
+  }
+  if(state.storage==='db'&&state.timeout&&!state.confirmed){
+    h+='<div class="banner note"><span>เชื่อมต่อที่เก็บข้อมูลไม่ได้ในตอนนี้ ตัวเลขที่เห็นอาจไม่ล่าสุด</span></div>';
+  }
+  $('banner').innerHTML=h;
+}
+
+function renderCards(hs,T){
+  const now=dt(T),y=now.getUTCFullYear(),m=now.getUTCMonth();
+  const ya=ymdDay(y,0,1),yb=ymdDay(y+1,0,1),ma=ymdDay(y,m,1),mb=ymdDay(y,m+1,1);
+  const cash=state.mode==='cash';
+  const yT=sumIn(hs,ya,yb),yD=sumIn(hs,ya,Math.min(yb,T+1));
+  const mT=sumIn(hs,ma,mb),mD=sumIn(hs,ma,Math.min(mb,T+1));
+  let life=0,lifeDone=0,perp=0,nF=0,nP=0;
+  for(const h of hs){
+    const w=Wt(h);
+    if(h._e!=null){
+      nF++;life+=cum(h,h._e,true)*w;
+      lifeDone+=(cash?payments(h,T,true).reduce((s,p)=>s+p.amount,0):cum(h,T+1,true))*w;
+    }else{
+      nP++;const t0=Math.max(T,h._s);perp+=(cum(h,t0+365)-cum(h,t0))*w;
+    }
+  }
+  const dn=cash?'รับแล้ว':'สะสมถึงวันนี้',rm=cash?'ยังไม่ถึงงวด':'เหลืออีก';
+  const lab=cash?'เงินเข้าปี ':'ดอกเบี้ยปี ';
+  let lifeCard;
+  if(nF>0){
+    lifeCard='<div class="lab">ตลอดอายุสัญญา</div><div class="num">'+money(life)+'</div>'+
+      '<div class="sub">ได้รับแล้ว <b>'+money(lifeDone)+'</b> · เหลือ <b>'+money(Math.max(0,life-lifeDone))+'</b></div>'+
+      (nP>0?'<div class="sub">+ <b>'+money(perp)+'</b> ต่อปี จากรายการที่ไม่มีวันครบกำหนด</div>':'');
+  }else if(nP>0){
+    lifeCard='<div class="lab">ต่อปี (ไม่มีวันครบกำหนด)</div><div class="num">'+money(perp)+'</div><div class="sub">รับต่อเนื่องไม่มีวันสิ้นสุด</div>';
+  }else{
+    lifeCard='<div class="lab">ตลอดอายุสัญญา</div><div class="num">'+money(0)+'</div>';
+  }
+  const prog=yT>0?Math.min(100,Math.max(0,yD/yT*100)):0;
+  $('cards').innerHTML=
+    '<article class="fig fig-main"><div class="lab">'+lab+(y+543)+'</div><div class="num">'+money(yT)+'</div>'+
+      '<div class="sub">'+dn+' <b>'+money(yD)+'</b> · '+rm+' <b>'+money(Math.max(0,yT-yD))+'</b></div>'+
+      '<div class="prog" role="img" aria-label="ผ่านไปแล้ว '+Math.round(prog)+' เปอร์เซ็นต์ของปีนี้"><i style="width:'+prog.toFixed(1)+'%"></i></div></article>'+
+    '<article class="fig"><div class="lab">'+(cash?'เงินเข้าเดือน ':'ดอกเบี้ยเดือน ')+MS[m]+' '+(y+543)+'</div><div class="num">'+money(mT)+'</div>'+
+      '<div class="sub">'+dn+' <b>'+money(mD)+'</b> · '+rm+' <b>'+money(Math.max(0,mT-mD))+'</b></div></article>'+
+    '<article class="fig">'+lifeCard+'</article>';
+}
+
+function renderByCcy(hs,T){
+  const now=dt(T),y=now.getUTCFullYear(),m=now.getUTCMonth();
+  const ya=ymdDay(y,0,1),yb=ymdDay(y+1,0,1),ma=ymdDay(y,m,1),mb=ymdDay(y,m+1,1);
+  const base=state.settings.base;
+  const codes=usedCcys(hs).sort((a,b)=>(a===base?-1:b===base?1:a.localeCompare(b)));
+  const rows=codes.map(c=>{
+    const g=hs.filter(h=>h.ccy===c),act=g.filter(h=>isActive(h,T));
+    const pr=act.reduce((s,h)=>s+h.principal,0);
+    const ea=act.filter(h=>!h.ss),ep=ea.reduce((s,h)=>s+h.principal,0);
+    const wr=ep>0?ea.reduce((s,h)=>s+h.principal*h.rate,0)/ep:0;
+    return {c,pr,wr,yr:sumIn(g,ya,yb),mo:sumIn(g,ma,mb),w:fx(c)};
+  });
+  const tot={pr:0,wp:0,yr:0,mo:0};
+  rows.forEach(r=>{tot.pr+=r.pr*r.w;tot.wp+=r.pr*r.w*r.wr;tot.yr+=r.yr*r.w;tot.mo+=r.mo*r.w;});
+  const label=state.mode==='cash'?'เงินเข้าปี '+(y+543):'ดอกเบี้ยปี '+(y+543);
+  let body=rows.map(r=>'<tr><td>'+r.c+'<small>'+CCY_NAME[r.c]+'</small></td><td class="mono">'+money(r.pr,r.c)+'</td><td class="mono">'+pct(r.wr)+'</td><td class="mono gold">'+money(r.yr,r.c)+'</td><td class="mono gold">'+money(r.mo,r.c)+'</td></tr>').join('');
+  if(rows.length>1){
+    body+='<tr class="total"><td>รวม<small>แปลงเป็น '+base+'</small></td><td class="mono">'+money(tot.pr,base)+'</td><td class="mono">'+pct(tot.pr>0?tot.wp/tot.pr:0)+'</td><td class="mono gold">'+money(tot.yr,base)+'</td><td class="mono gold">'+money(tot.mo,base)+'</td></tr>';
+  }
+  $('byCcy').innerHTML='<table><thead><tr><th>สกุลเงิน</th><th>เงินต้น</th><th>ดอกเบี้ยเฉลี่ย</th><th>'+label+'</th><th>เดือนนี้</th></tr></thead><tbody>'+body+'</tbody></table>';
+}
+
+function renderChart(hs,T){
+  const y=state.year,arr=monthBuckets(hs,y),maxV=Math.max(0,...arr);
+  const step=niceStep(Math.max(maxV,400)/4),top=step*Math.max(1,Math.ceil(maxV/step-1e-9));
+  const W=640,H=232,L=60,R=8,Tp=16,B=28,iw=W-L-R,ih=H-Tp-B,band=iw/12,bw=band*0.62;
+  const nd=dt(T),cy=nd.getUTCFullYear(),cm=nd.getUTCMonth();
+  let s='<svg viewBox="0 0 '+W+' '+H+'" role="group" aria-label="ดอกเบี้ยรายเดือน ปี '+(y+543)+'">';
+  s+='<text class="ax" x="'+(L-8)+'" y="9" text-anchor="end">'+DISP+'</text>';
+  for(let v=0;v<=top+1e-9;v+=step){
+    const yy=Tp+ih-(v/top)*ih;
+    s+='<line class="gl" x1="'+L+'" x2="'+(W-R)+'" y1="'+yy.toFixed(1)+'" y2="'+yy.toFixed(1)+'"/><text class="ax" x="'+(L-8)+'" y="'+(yy+4).toFixed(1)+'" text-anchor="end">'+NF.format(v)+'</text>';
+  }
+  arr.forEach((v,i)=>{
+    const hgt=v>0?Math.max(1.5,(v/top)*ih):0,x=L+i*band+(band-bw)/2,yy=Tp+ih-hgt;
+    const cur=y===cy&&i===cm,past=y<cy||(y===cy&&i<cm);
+    const cls='bar'+(cur?' cur':past?' past':'');
+    s+='<g class="bargrp'+(state.sel===i?' sel':'')+'" data-act="bar" data-m="'+i+'" tabindex="0" role="button" aria-label="'+MS[i]+' '+NF.format(Math.round(v))+' '+DISP+'">'+
+      '<rect class="hit" x="'+(L+i*band).toFixed(1)+'" y="'+Tp+'" width="'+band.toFixed(1)+'" height="'+ih+'"/>'+
+      '<rect class="'+cls+'" x="'+x.toFixed(1)+'" y="'+yy.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'" rx="2"/></g>'+
+      '<text class="ax" x="'+(L+i*band+band/2).toFixed(1)+'" y="'+(H-9)+'" text-anchor="middle">'+MS[i]+'</text>';
+  });
+  s+='</svg>';
+  $('chart').innerHTML=s;
+  const total=arr.reduce((a,b)=>a+b,0);
+  $('chartRead').innerHTML=state.sel==null
+    ?'รวมทั้งปี '+(y+543)+': <b>'+money(total)+'</b> <span class="hint">แตะแท่งเพื่อดูแต่ละเดือน</span>'
+    :MS[state.sel]+' '+(y+543)+': <b>'+money(arr[state.sel])+'</b>';
+}
+
+function renderUpcoming(hs,T){
+  const ev=[],idx={};
+  const add=(h,day,amt,ret,cr)=>{const k=h.id+'|'+day+'|'+ret+'|'+(cr?1:0);if(idx[k])idx[k].amt+=amt;else{idx[k]={day,name:h.name||TYPES[h.type],amt,ccy:h.ccy,ret,cr:!!cr,acct:ret?(h.acctp||h.acct):h.acct,broker:h.broker};ev.push(idx[k]);}};
+  const until=T+365;
+  for(const h of hs){
+    if(h.compound&&!h.ss){
+      /* compounding accounts keep the interest inside: show each time it is credited, so a monthly account shows 12 rows */
+      const finite=h._e!=null&&!rolls(h),E=h._e;
+      const f=h.freq>0?h.freq:(finite?0:1);
+      let prev=h._s,pend=0;
+      if(f>0){
+        const a0=h._a!=null?h._a:h._s,step=12/f,anchor=dt(a0).getUTCDate();
+        for(let k=1;k<2000;k++){
+          const d=addMonths(a0,k*step,anchor);
+          if(d<=h._s)continue;
+          if(finite&&d>=E)break;
+          if(d>until)break;
+          const amt=cum(h,d)-cum(h,prev);prev=d;
+          if(d>=T&&amt!==0)add(h,d,amt,false,true);
+        }
+      }
+      if(finite&&E<=until&&E>=T){const amt=cum(h,E,true)-cum(h,prev,true);if(amt!==0)add(h,E,amt,false,false);}
+    }else{
+      for(const p of payments(h,until)){if(p.day>=T&&p.amount!==0)add(h,p.day,p.amount,false);}
+    }
+    if(h.ss){for(const x of h.sched)if(x.k==='p'&&x.day>=T&&x.day<=until)add(h,x.day,x.a,true);}
+    else if(h._e!=null&&h._e>=T&&h._e<=until&&!CTX.ro)add(h,h._e,h.principal,true);
+  }
+  for(let i=ev.length-1;i>=0;i--)if(ev[i].amt<=0.5)ev.splice(i,1);
+  ev.sort((a,b)=>a.day-b.day||(a.ret?1:0)-(b.ret?1:0));
+  if(!ev.length){$('upcoming').innerHTML='<p class="empty">ยังไม่มีงวดที่จะถึงใน 12 เดือนข้างหน้า</p>';return;}
+  const row=e=>{
+    const diff=e.day-T;
+    const when=diff===0?'วันนี้':diff===1?'พรุ่งนี้':'อีก '+diff+' วัน';
+    return '<div class="ev"><span class="d">'+fmtDate(e.day)+'</span><span class="n">'+esc(e.name)+'<small>'+(e.ret?'ครบกำหนด · เงินต้นคืน':e.cr?'ดอกเบี้ยทบเข้ายอด':'ดอกเบี้ย')+' · '+when+(e.acct&&!e.cr?' · เข้า '+esc(e.acct):'')+'</small></span>'+
+      '<span class="a'+(e.ret?' ret':'')+'">'+(e.ret?'':'+')+money(e.amt,e.ccy)+'</span></div>';
+  };
+  const shown=ev.slice(0,6),rest=ev.slice(6);
+  $('upcoming').innerHTML='<p class="hint" style="margin-bottom:6px">ทั้งหมด '+ev.length+' งวดใน 12 เดือนข้างหน้า</p>'+shown.map(row).join('')+
+    (rest.length?'<details class="tops"><summary>ดูอีก '+rest.length+' งวด</summary>'+rest.map(row).join('')+'</details>':'');
+}
+
+const compactNum=v=>v>=1e6?(v/1e6).toFixed(v>=1e7?0:1)+'M':v>=1e3?(v/1e3).toFixed(v>=1e4?0:1)+'k':String(Math.round(v));
+function renderYearChart(hs,T){
+  const n=state.ySpan,y0=dt(T).getUTCFullYear();
+  const vals=[];for(let i=0;i<n;i++)vals.push(sumIn(hs,ymdDay(y0+i,0,1),ymdDay(y0+i+1,0,1)));
+  const maxV=Math.max(0,...vals),step=niceStep(Math.max(maxV,400)/4),top=step*Math.max(1,Math.ceil(maxV/step-1e-9));
+  const W=640,H=250,L=60,R=8,Tp=20,B=34,iw=W-L-R,ih=H-Tp-B,band=iw/n,bw=Math.min(band*0.7,46);
+  let g='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="ดอกเบี้ยรายปี '+n+' ปีข้างหน้า">';
+  g+='<text class="ax" x="'+(L-8)+'" y="9" text-anchor="end">'+DISP+'</text>';
+  for(let v=0;v<=top+1e-9;v+=step){const yy=Tp+ih-(v/top)*ih;g+='<line class="gl" x1="'+L+'" x2="'+(W-R)+'" y1="'+yy.toFixed(1)+'" y2="'+yy.toFixed(1)+'"/><text class="ax" x="'+(L-8)+'" y="'+(yy+4).toFixed(1)+'" text-anchor="end">'+NF.format(v)+'</text>';}
+  const every=n<=10?1:n<=20?2:5;
+  vals.forEach((v,i)=>{
+    const hgt=v>0?Math.max(1.5,(v/top)*ih):0,x=L+i*band+(band-bw)/2,yy=Tp+ih-hgt,cx=L+i*band+band/2;
+    g+='<rect class="bar'+(i===0?' cur':'')+'" x="'+x.toFixed(1)+'" y="'+yy.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'" rx="2"><title>'+(y0+i+543)+': '+money(v)+'</title></rect>';
+    if(n<=10&&v>0)g+='<text class="ax" x="'+cx.toFixed(1)+'" y="'+(yy-4).toFixed(1)+'" text-anchor="middle">'+compactNum(v)+'</text>';
+    if(i%every===0)g+='<text class="ax" x="'+cx.toFixed(1)+'" y="'+(H-12)+'" text-anchor="middle">'+(y0+i+543)+'</text>';
+  });
+  g+='</svg>';
+  $('chartY').innerHTML=g;
+  const tot=vals.reduce((a,b)=>a+b,0);
+  $('yRead').innerHTML='รวม '+n+' ปี (ปี '+(y0+543)+' ถึง '+(y0+n-1+543)+'): <b>'+money(tot)+'</b> · ปีที่ได้มากสุด <b>'+(y0+vals.indexOf(maxV)+543)+'</b> '+money(maxV);
+  let cu=0;
+  $('yTbl').innerHTML='<table><thead><tr><th>ปี</th><th>'+(state.mode==='cash'?'เงินเข้า':'ดอกเบี้ย')+'</th><th>สะสม</th></tr></thead><tbody>'+vals.map((v,i)=>{cu+=v;return '<tr><td>'+(y0+i+543)+(i===0?'<small>ปีนี้</small>':'')+'</td><td class="mono gold">'+money(v)+'</td><td class="mono">'+money(cu)+'</td></tr>';}).join('')+'</tbody></table>';
+  $('yNote').textContent=(state.settings.rollover?'จำลองว่าเงินต้นที่ครบกำหนดถูกลงทุนต่อที่อัตราเดิม':'เงินต้นที่ครบกำหนดไม่ได้ลงทุนต่อ ดอกเบี้ยจึงลดลงในปีหลังๆ ถ้าอยากจำลองการลงทุนต่อ ให้ติ๊ก "ต่ออายุอัตราเดิม" ในหน้าวางแผนเกษียณ')+' · ปีนี้นับทั้งปี ไม่ใช่เฉพาะที่เหลือ';
+  document.querySelectorAll('[data-act="yspan"]').forEach(b=>b.setAttribute('aria-pressed',String(+b.dataset.n===n)));
+}
+/* principal coming back (maturities, and principal-return rows of insurance/lottery), soonest first. Interest is in the upcoming-payments list. */
+function renderReturns(hs,T){
+  const ev=[],base=state.settings.base,scope=state.scope;
+  hs.filter(h=>scope==='ALL'||h.ccy===scope).forEach(h=>{
+    const nm=h.name||TYPES[h.type];
+    if(h.ss){
+      h.sched.forEach(x=>{if(x.k==='p'&&x.day>=T)ev.push({day:x.day,h,nm,amt:x.a,acct:h.acct});});
+      return;
+    }
+    if(h._e==null)return;
+    const waiting=h._e<T&&!h.received&&h._e>=T-90;
+    if(h._e<T&&!waiting)return;
+    ev.push({day:h._e,h,nm,amt:h.principal+h.topups.reduce((s,t)=>s+t.a,0),acct:h.acctp||h.acct,waiting});
+  });
+  ev.sort((a,b)=>a.day-b.day);
+  if(!ev.length){$('returns').innerHTML='<p class="empty">ยังไม่มีรายการที่มีวันครบกำหนดหรือวันรับเงินต้นคืนในอนาคต</p>';return;}
+  const tot=ev.reduce((s,e)=>s+e.amt*fx(e.h.ccy),0);
+  const row=e=>{
+    const d=e.day-T,when=e.waiting?'<span class="stale">ครบกำหนดแล้ว · รอเงินเข้า</span>':d===0?'วันนี้':d===1?'พรุ่งนี้':remaining(d);
+    return '<div class="ev"><span class="d">'+fmtDate(e.day)+'</span><span class="n">'+esc(e.nm)+'<span class="chip">'+TYPES[e.h.type]+'</span><small>'+when+(e.h.broker?' · '+esc(e.h.broker):'')+(e.acct?' · เข้า '+esc(e.acct):'')+'</small></span>'+
+      '<span class="a ret">'+money(e.amt,e.h.ccy)+'</span></div>';
+  };
+  $('returns').innerHTML='<p class="hint" style="margin-bottom:6px">'+ev.length+' รายการ รวมเงินต้นประมาณ <b>'+money(tot,base)+'</b> (แปลงเป็น '+base+') เรียงจากที่ได้เร็วสุด ดอกเบี้ยดูได้ที่ "งวดที่จะถึงใน 12 เดือน"</p>'+ev.slice(0,8).map(row).join('')+
+    (ev.length>8?'<details class="tops"><summary>ดูอีก '+(ev.length-8)+' รายการ</summary>'+ev.slice(8).map(row).join('')+'</details>':'');
+}
+function renderByType(hs,T){
+  const y=dt(T).getUTCFullYear(),ya=ymdDay(y,0,1),yb=ymdDay(y+1,0,1);
+  const rows=Object.keys(TYPES).map(k=>{
+    const g=hs.filter(h=>h.type===k);if(!g.length)return null;
+    const act=g.filter(h=>isActive(h,T));
+    const pr=act.reduce((s,h)=>s+h.principal*Wt(h),0);
+    const ea=act.filter(h=>!h.ss),ep=ea.reduce((s,h)=>s+h.principal*Wt(h),0);
+    const wr=ep>0?ea.reduce((s,h)=>s+h.principal*Wt(h)*h.rate,0)/ep:0;
+    return {k,pr,wr,yr:sumIn(g,ya,yb),ss:g.length>0&&g.every(h=>h.ss)};
+  }).filter(Boolean);
+  if(!rows.length){$('byType').innerHTML='<p class="empty">ยังไม่มีรายการ</p>';return;}
+  $('byType').innerHTML='<table><thead><tr><th>ประเภท</th><th>เงินต้น</th><th>ดอกเบี้ยเฉลี่ย</th><th>ปี '+(y+543)+'</th></tr></thead><tbody>'+
+    rows.map(r=>'<tr><td>'+TYPES[r.k]+'</td><td class="mono">'+money(r.pr)+'</td><td class="mono">'+(r.ss?'—':pct(r.wr))+'</td><td class="mono gold">'+money(r.yr)+'</td></tr>').join('')+
+    '</tbody></table>';
+}
+
+/* ---------- retirement ---------- */
+function ageInfo(T){
+  const s=state.settings,bd=toDay(s.birth);
+  if(!Number.isFinite(bd))return null;
+  const b=dt(bd),nd=dt(T);
+  let age=nd.getUTCFullYear()-b.getUTCFullYear();
+  if(ymdDay(nd.getUTCFullYear(),b.getUTCMonth(),b.getUTCDate())>T)age--;
+  return {b,age};
+}
+function milestones(T){
+  const s=state.settings,step=Math.min(30,Math.max(1,Math.round(+s.step)||10));
+  const nd=dt(T),ai=ageInfo(T),rows=[];
+  if(ai){
+    const b=ai.b,age=ai.age,target=Math.round(+s.targetAge)||60;
+    const set=new Set();
+    for(let a=Math.floor(age/step)*step+step;a<=Math.max(90,target);a+=step)set.add(a);
+    if(target>age)set.add(target);
+    const arr=[...set].sort((x,y)=>x-y).filter((a,i)=>i<12||a===target);
+    arr.forEach(a=>{
+      const day=ymdDay(b.getUTCFullYear()+a,b.getUTCMonth(),b.getUTCDate());
+      if(day>T)rows.push({label:'อายุ '+a,sub:'พ.ศ. '+(b.getUTCFullYear()+a+543),day,target:a===target});
+    });
+    return {rows,hasBirth:true,age,target};
+  }
+  for(let k=1;k<=5;k++){
+    const day=ymdDay(nd.getUTCFullYear()+k*step,nd.getUTCMonth(),nd.getUTCDate());
+    rows.push({label:'อีก '+(k*step)+' ปี',sub:'พ.ศ. '+(nd.getUTCFullYear()+k*step+543),day,target:false});
+  }
+  return {rows,hasBirth:false};
+}
+function wealthParts(h,day,T){
+  if(h.ss)return {p:h.sched.reduce((s,x)=>s+(x.k==='p'&&x.day<=day?x.a:0),0),i:h.sched.reduce((s,x)=>s+(x.k==='i'&&x.day>T&&x.day<=day?x.a:0),0)};
+  /* money at `day` from this holding, own currency: principal + interest kept (simple payouts counted from today, compounding from the start) */
+  const i=h.compound?cum(h,day):cum(h,day)-cum(h,T);
+  return {p:h.principal,i:i};
+}
+const realMr=(g,f)=>Math.pow((1+g)/(1+f),1/12)-1;
+const annF=(i,k)=>i===0?k:(1-Math.pow(1+i,-k))/i;
+/* present value at retirement age R of every state pension that is still paid between R and lifeAge, in today's money (assumed to rise with inflation) */
+function pensionPV(R,life,mr){
+  let pv=0;
+  (state.settings.pensions||[]).forEach(p=>{
+    const m=(+p.amt||0)*fx(p.ccy||'THB'),sa=Math.max(+p.age||0,R),k=Math.floor((life-sa)*12);
+    if(!(m>0)||!(k>0))return;
+    if(p.kind==='l'){pv+=m/Math.pow(1+mr,(sa-R)*12);return;}
+    pv+=m*annF(mr,k)/Math.pow(1+mr,(sa-R)*12);
+  });
+  return pv;
+}
+function yrs(n){const y=Math.floor(n/12),m=Math.round(n%12);return (y?y+' ปี':'')+(m?(y?' ':'')+m+' เดือน':'')||'0 เดือน';}
+
+/* earliest month at which today's money (growing, no new savings) can pay S per month until lifeAge */
+function earliestRetire(act,T,ai,g,f,S,lifeAge){
+  const bd=ymdDay(ai.b.getUTCFullYear(),ai.b.getUTCMonth(),ai.b.getUTCDate());
+  const wealthAt=day=>act.reduce((x,h)=>{const w=wealthParts(h,day,T);return x+(w.p+w.i)*h._w;},0)+assetFutureBase(day,T);
+  const anchor=dt(T).getUTCDate(),maxM=Math.max(0,Math.floor((lifeAge-ai.age)*12)-12);
+  for(let m=0;m<=maxM;m++){
+    const day=m===0?T:addMonths(T,m,anchor);
+    const ageY=(day-bd)/365.25,N=(lifeAge-ageY)*12;
+    if(N<12)break;
+    const W=wealthAt(day),c=retireCalc({W,g,f,n:(day-T)/365*12,N,S,pv:pensionPV(ageY,lifeAge,realMr(g,f))});
+    if(c.gap<=0)return {m,day,age:ageY,W:W,Wr:c.Wr,need:c.need};
+  }
+  return null;
+}
+function renderEarly(act,T,ai,g,f,S,lifeAge,retAge){
+  if(!(S>0)){$('retEarly').innerHTML='<p class="empty">ใส่ "อยากใช้เดือนละ" ในข้อมูลสำหรับวางแผนเพื่อดูว่าเกษียณได้เร็วสุดตอนไหน</p>';return;}
+  const r=earliestRetire(act,T,ai,g,f,S,lifeAge);
+  const sp=money(S);
+  if(!r){
+    $('retEarly').innerHTML='<div class="vhead"><span class="status no">ยังไม่พอ</span><span>ถ้าใช้เดือนละ '+sp+' ถึงอายุ '+lifeAge+' เงินที่มีตอนนี้ ต่อให้รอไปก่อนก็ยังไม่พอ</span></div>'+
+      '<p class="hint" style="margin-top:8px">ต้องเก็บเพิ่ม หรือลดเงินที่อยากใช้ต่อเดือน ดูตัวเลขที่ต้องเก็บเพิ่มได้ในหัวข้อเป้าหมายการใช้จ่ายด้านล่าง</p>';
+    return;
+  }
+  const ay=Math.floor(r.age),am=Math.floor((r.age-ay)*12+1e-9);
+  const diff=retAge-r.age;
+  const cmp=r.m===0?'เกษียณได้ตั้งแต่ตอนนี้เลย':(diff>=0.08?'เร็วกว่าเป้าที่ตั้งไว้ ('+retAge+' ปี) ประมาณ '+yrs(Math.round(diff*12)):diff<=-0.08?'ช้ากว่าเป้าที่ตั้งไว้ ('+retAge+' ปี) ประมาณ '+yrs(Math.round(-diff*12)):'ใกล้เคียงเป้าที่ตั้งไว้ ('+retAge+' ปี)');
+  $('retEarly').innerHTML='<div class="vhead"><span class="status ok">'+(r.m===0?'เกษียณได้เลย':'เกษียณได้ตอนอายุ '+ay+' ปี'+(am?' '+am+' เดือน':''))+'</span><span>'+cmp+'</span></div>'+
+    '<dl class="kv"><div><dt>เงื่อนไข<small>ใช้เงินที่มีตอนนี้ ไม่เก็บเพิ่ม ปล่อยให้งอกเงยจนถึงวันเกษียณ</small></dt><dd>เดือนละ '+sp+' ถึงอายุ '+lifeAge+'</dd></div>'+
+    '<div><dt>วันที่เกษียณได้เร็วสุด</dt><dd>'+fmtDate(r.day)+'</dd></div>'+
+    '<div><dt>เงินที่จะมี ณ วันนั้น'+(f>0?'<small>มูลค่าเงินวันนี้ '+money(r.Wr)+'</small>':'')+'</dt><dd>'+money(r.W)+'</dd></div>'+
+    '<div><dt>เงินที่ต้องมี ณ วันนั้น'+(f>0?' (มูลค่าเงินวันนี้)':'')+'</dt><dd>'+money(r.need)+'</dd></div></dl>'+
+    '<p class="hint" style="margin-top:8px">คิดผลตอบแทนหลังเกษียณ '+NF2.format(g*100)+'% ต่อปี'+(f>0?' เงินเฟ้อ '+NF2.format(f*100)+'%':'')+' เงินที่จะได้หลังวันเกษียณจากประกันยังไม่นับ</p>';
+}
+function renderRetire(all,T){
+  const s=state.settings,base=state.settings.base;
+  DISP=base;
+  const act=all.filter(h=>isActive(h,T));
+  const retAge=Math.round(+s.targetAge)||60,lifeAge=Math.round(+s.lifeAge)||85;
+  const S=Math.max(0,+s.spend||0),f=Math.max(0,+s.infl||0)/100;
+  const basePr=act.reduce((x,h)=>x+h.principal*h._w,0);
+  const earn=act.filter(h=>!h.ss),earnPr=earn.reduce((x,h)=>x+h.principal*h._w,0);
+  const autoG=earnPr>0?earn.reduce((x,h)=>x+h.principal*h._w*h.rate*(1-h.tax/100),0)/earnPr/100:0;
+  const g=(+s.retRate>0)?(+s.retRate/100):autoG;
+  $('s-rate').placeholder='อัตโนมัติ '+NF2.format(autoG*100);
+  $('spendCcy').textContent=base;$('fxBaseLbl').textContent=base;
+  $('hProj').textContent='คาดการณ์ตามช่วงอายุ ('+base+')';
+
+  const ai=ageInfo(T);
+  $('retSum').textContent=' เกษียณ '+retAge+' · อยู่ถึง '+lifeAge+' · ใช้เดือนละ '+money(S)+(ai?' · อายุตอนนี้ '+ai.age:' · ยังไม่ได้ใส่วันเกิด');
+  const need=$('retNeed');
+  let Rday=null;
+  if(ai){Rday=Math.max(T,ymdDay(ai.b.getUTCFullYear()+retAge,ai.b.getUTCMonth(),ai.b.getUTCDate()));}
+  const bad=!ai?'ใส่วันเกิดด้านบนเพื่อให้คำนวณเงินตอนเกษียณได้'
+    :(lifeAge<=retAge?'อายุที่คาดว่าจะอยู่ถึง ต้องมากกว่าอายุเกษียณ':'');
+  need.hidden=!bad;need.innerHTML=bad?'<span>'+bad+'</span>':'';
+
+  if(!bad){
+    const n=(Rday-T)/365*12,N=(lifeAge-retAge)*12;
+    const byC={};
+    const mk=cc=>byC[cc]||(byC[cc]={p:0,i:0,a:0,w:fx(cc)});
+    act.forEach(h=>{const w=wealthParts(h,Rday,T);const o=mk(h.ccy);o.p+=w.p;o.i+=w.i;});
+    const mr_=mktRate(),nyr=Math.max(0,(Rday-T)/365);
+    if(mr_!=null)listAssets(T).forEach(a=>{const v=assetCalc(a,T).val;if(v>0)mk(a.ccy||'THB').a+=v*Math.pow(1+mr_/100,nyr);});
+    let P=0,I=0,A=0;
+    Object.keys(byC).forEach(cc=>{P+=byC[cc].p*byC[cc].w;I+=byC[cc].i*byC[cc].w;A+=byC[cc].a*byC[cc].w;});
+    const Wn=P+I+A;
+    const pv=pensionPV(retAge,lifeAge,realMr(g,f));
+    const c=retireCalc({W:Wn,g,f,n,N,S,pv});
+    LAST={Wn:P+I,g,f,n,N,S,pv,retAge,lifeAge,Rday};
+    const today=f>0?' (มูลค่าเงินวันนี้)':'';
+    const atNow=Rday===T;
+
+    $('retHero').innerHTML=
+      '<article class="fig fig-main"><div class="lab">เงินทั้งหมด'+(atNow?'ตอนนี้ (ถึงอายุเกษียณแล้ว)':'ตอนอายุ '+retAge+' ('+fmtDate(Rday)+')')+'</div><div class="num">'+money(Wn)+'</div>'+
+        '<div class="sub">เงินต้น <b>'+money(P)+'</b> + ดอกเบี้ยสะสม <b>'+money(I)+'</b>'+(mr_!=null?' + หุ้น/กองทุน/ทอง <b>'+money(A)+'</b>':'')+'</div>'+
+        (mr_!=null?'<div class="sub">หุ้น กองทุน ทอง คิดที่ผลตอบแทน '+NF2.format(mr_)+'% ต่อปี ('+({low:'กรณีแย่',base:'กรณีกลาง',high:'กรณีดี'}[state.settings.mktCase||'base'])+') ดูอีก 2 กรณีในตารางด้านล่าง</div>':'<div class="sub">ยังไม่นับหุ้น กองทุน ทอง</div>')+
+        (f>0?'<div class="sub">เท่ากับ <b>'+money(c.Wr)+'</b> ในมูลค่าเงินวันนี้</div>':'')+'</article>'+
+      '<article class="fig"><div class="lab">ใช้ได้เดือนละ ถ้าไม่แตะเงินต้น'+today+'</div><div class="num">'+money(c.interestOnly)+'</div>'+
+        (c.mr<=0&&c.Wr>0?'<div class="sub">ผลตอบแทน <b>'+NF2.format(g*100)+'%</b> ต่ำกว่าหรือเท่าเงินเฟ้อ <b>'+NF2.format(f*100)+'%</b> เงินต้นรักษากำลังซื้อไว้ไม่ได้ จึงเป็น 0 (ถ้าใช้เฉพาะดอกเบี้ยจะได้ประมาณ '+money(c.Wr*g/12)+' ต่อเดือน แต่กำลังซื้อของเงินต้นลดลงทุกปี) ลองใส่ "ผลตอบแทนหลังเกษียณ" ในข้อมูลสำหรับวางแผน</div>':'<div class="sub">ใช้เฉพาะดอกเบี้ย เงินต้นอยู่ครบ · คิดที่ <b>'+NF2.format(g*100)+'%</b> ต่อปี</div>')+'</article>'+
+      '<article class="fig"><div class="lab">ใช้ได้เดือนละ ถ้าใช้หมดพอดีตอนอายุ '+lifeAge+today+'</div><div class="num">'+money(c.sustain)+'</div>'+
+        '<div class="sub">เป็นเวลา <b>'+yrs(N)+'</b> หลังเกษียณ</div>'+(pv>0?'<div class="sub">+ บำนาญรัฐเฉลี่ย <b>'+money(c.pAvg)+'</b> ต่อเดือน รวมเป็น <b>'+money(c.sustain+c.pAvg)+'</b></div>':'')+'</article>';
+
+    renderEarly(act,T,ai,g,f,S,lifeAge,retAge);
+    $('hVerdict').textContent='ถ้าอยากใช้เดือนละ '+money(S)+' หลังเกษียณ';
+    let v='';
+    if(S<=0){
+      v='<p class="empty">ใส่ "อยากใช้เดือนละ" ด้านบนเพื่อดูว่าเงินพอไหม</p>';
+    }else if(c.gap<=0){
+      v='<div class="vhead"><span class="status ok">เงินพอใช้</span><span>ถึงอายุ '+lifeAge+' และยังเหลือเงินอีก</span></div>'+
+        '<dl class="kv"><div><dt>เงินที่ต้องมีตอนเกษียณ'+today+'</dt><dd>'+money(c.need)+'</dd></div>'+
+        '<div><dt>เงินที่มี'+today+'</dt><dd>'+money(c.Wr)+'</dd></div>'+
+        '<div><dt>เกินเป้าหมายอยู่'+today+'</dt><dd>'+money(-c.gap)+'</dd></div>'+
+        '<div><dt>เหลือตอนอายุ '+lifeAge+today+'</dt><dd>'+money(c.left)+'</dd></div></dl>';
+    }else{
+      const ranOutAge=c.runOut===Infinity?null:retAge+c.runOut/12;
+      v='<div class="vhead"><span class="status no">เงินไม่พอ</span><span>'+(ranOutAge==null?'':'เงินจะหมดตอนอายุประมาณ '+yrs(Math.round(ranOutAge*12)))+'</span></div>'+
+        '<dl class="kv"><div><dt>เงินที่ต้องมีตอนเกษียณ'+today+'</dt><dd>'+money(c.need)+'</dd></div>'+
+        '<div><dt>เงินที่มี'+today+'</dt><dd>'+money(c.Wr)+'</dd></div>'+
+        '<div><dt>ขาดอีก'+today+'</dt><dd>'+money(c.gap)+'</dd></div>'+
+        '<div><dt>ต้องเก็บเพิ่มเดือนละ'+today+'<small>'+(n>0?'ตั้งแต่วันนี้จนถึงอายุ '+retAge+' เก็บแล้วได้ผลตอบแทนเท่ากัน':'จ่ายเป็นก้อนเดียวตอนนี้')+'</small></dt><dd>'+money(n>0?c.monthly:c.gap)+'</dd></div>'+
+        (n>0?'<div><dt>หรือเก็บเป็นเงินก้อนเพิ่มวันนี้</dt><dd>'+money(c.lump)+'</dd></div>':'')+
+        '</dl>';
+    }
+    if(pv>0)v+='<p class="hint" style="margin-top:10px">นับบำนาญรัฐ '+(state.settings.pensions||[]).length+' รายการแล้ว มูลค่า ณ วันเกษียณ '+money(pv)+' (คิดเป็นเงินวันนี้ และปรับตามเงินเฟ้อ) ทำให้เงินที่ต้องมีลดลงเหลือ '+money(c.need)+'</p>';
+    v+='<p class="hint" style="margin-top:10px">สมมติว่าดอกเบี้ยที่ได้ก่อนเกษียณถูกเก็บไว้เฉยๆ (ยกเว้นรายการทบต้น) และหลังเกษียณเงินทั้งก้อนได้ผลตอบแทน '+NF2.format(g*100)+'% ต่อปี'+
+      (f>0?' เงินเฟ้อ '+NF2.format(f*100)+'% ต่อปี ตัวเลขที่ระบุว่ามูลค่าเงินวันนี้คือกำลังซื้อเท่ากับเงินในวันนี้':'')+'</p>';
+    $('retVerdict').innerHTML=v;
+
+    $('hWealth').textContent='เงินทั้งหมด'+(atNow?'ตอนนี้':'ตอนอายุ '+retAge)+' แยกตามสกุลเงิน';
+    const codes=Object.keys(byC).sort((a,b)=>(a===base?-1:b===base?1:a.localeCompare(b)));
+    let rows=codes.map(k=>{const o=byC[k];return '<tr><td>'+k+'<small>'+CCY_NAME[k]+'</small></td><td class="mono">'+money(o.p,k)+'</td><td class="mono gold">'+money(o.i,k)+'</td><td class="mono">'+(mr_!=null?money(o.a,k):'—')+'</td><td class="mono">'+money(o.p+o.i+o.a,k)+'</td>'+
+      (codes.length>1?'<td class="mono">'+money((o.p+o.i+o.a)*o.w,base)+'</td>':'')+'</tr>';}).join('');
+    if(codes.length>1)rows+='<tr class="total"><td>รวม<small>แปลงเป็น '+base+'</small></td><td class="mono">'+money(P,base)+'</td><td class="mono gold">'+money(I,base)+'</td><td class="mono">'+(mr_!=null?money(A,base):'—')+'</td><td class="mono">'+money(Wn,base)+'</td><td class="mono">'+money(Wn,base)+'</td></tr>';
+    $('wealthTbl').innerHTML=codes.length?'<table><thead><tr><th>สกุลเงิน</th><th>เงินต้น</th><th>ดอกเบี้ยสะสม</th><th>หุ้น/กองทุน/ทอง (คาดการณ์)</th><th>รวม</th>'+(codes.length>1?'<th>เป็น '+base+'</th>':'')+'</tr></thead><tbody>'+rows+'</tbody></table>':'<p class="empty">ยังไม่มีรายการ</p>';
+  }else{
+    $('retHero').innerHTML='';LAST=null;$('retEarly').innerHTML='<p class="empty">กรอกวันเกิดและข้อมูลด้านบนให้ครบเพื่อดูว่าเกษียณได้เร็วสุดตอนอายุเท่าไหร่</p>';
+    $('hVerdict').textContent='เป้าหมายการใช้จ่าย';
+    $('retVerdict').innerHTML='<p class="empty">กรอกข้อมูลด้านบนให้ครบเพื่อดูว่าเงินพอใช้ไหม</p>';
+    $('hWealth').textContent='เงินทั้งหมดตอนเกษียณ แยกตามสกุลเงิน';
+    $('wealthTbl').innerHTML='<p class="empty">กรอกข้อมูลด้านบนให้ครบเพื่อดูตาราง</p>';
+  }
+  renderProjection(act,T,basePr);
+}
+
+function renderProjection(act,T,base){
+  const ms=milestones(T);
+  const wealthAt=day=>act.reduce((x,h)=>{const w=wealthParts(h,day,T);return x+(w.p+w.i)*h._w;},0)+assetFutureBase(day,T);
+  const c0=act.reduce((x,h)=>x+cum(h,T)*h._w,0);
+  const yearAt=day=>act.reduce((x,h)=>x+(cum(h,day+365)-cum(h,day))*h._w,0);
+  const data=[{label:'ตอนนี้',sub:fmtDate(T),yr:yearAt(T),cu:null,wl:wealthAt(T),target:false}].concat(ms.rows.map(r=>({
+    label:r.label,sub:r.sub,yr:yearAt(r.day),cu:act.reduce((x,h)=>x+cum(h,r.day)*h._w,0)-c0,wl:wealthAt(r.day),target:r.target
+  })));
+  const maxYr=Math.max(1,...data.map(d=>d.yr));
+  const body=data.map(d=>{
+    const yp=base>0?d.yr/base*100:0,cp=base>0&&d.cu!=null?d.cu/base*100:null;
+    return '<tr'+(d.target?' class="target"':'')+'><td>'+d.label+(d.target?'<span class="tag">เกษียณ</span>':'')+'<small>'+d.sub+'</small></td>'+
+      '<td class="mono">'+money(d.wl)+'</td>'+
+      '<td class="mono gold">'+money(d.yr)+'<span class="meter"><i style="width:'+Math.min(100,d.yr/maxYr*100).toFixed(1)+'%"></i></span></td>'+
+      '<td class="mono">'+pct(yp)+'</td>'+
+      '<td class="mono gold">'+(d.cu==null?'—':money(d.cu))+'</td>'+
+      '<td class="mono">'+(cp==null?'—':pct(cp))+'</td></tr>';
+  }).join('');
+  $('proj').innerHTML='<table><thead><tr><th>ช่วงเวลา</th><th>เงินทั้งหมด</th><th>ดอกเบี้ยต่อปี ณ ตอนนั้น</th><th>% ต่อปี</th><th>ดอกเบี้ยสะสมจากวันนี้</th><th>% สะสม</th></tr></thead><tbody>'+body+'</tbody></table>';
+  let note='เปอร์เซ็นต์คิดจากเงินต้นรวมที่ยังไม่ครบกำหนด '+money(base)+' คำนวณแบบสะสมรายวัน';
+  if(!ms.hasBirth)note='ใส่วันเกิดเพื่อดูเป็นช่วงอายุ ตอนนี้แสดงเป็นอีกกี่ปีข้างหน้า · '+note;
+  else if(ms.target<=ms.age)note='อายุเกษียณ '+ms.target+' ปี ผ่านมาแล้ว · '+note;
+  if(!state.settings.rollover&&act.some(h=>h._e!=null))note+=' · เงินต้นที่ครบกำหนดไม่ได้นำไปลงทุนต่อ ดอกเบี้ยจึงลดลง ติ๊ก "ต่ออายุอัตราเดิม" เพื่อจำลองการลงทุนต่อ';
+  if(mktRate()!=null)note+=' · คอลัมน์ "เงินทั้งหมด" รวมหุ้น กองทุน ทอง ที่ผลตอบแทน '+NF2.format(mktRate())+'% ต่อปี ส่วนดอกเบี้ยและ % ในตารางนับเฉพาะหุ้นกู้และเงินฝาก';
+  $('projNote').textContent=note;
+}
+
+let fxSig='';
+function renderFx(used){
+  const base=state.settings.base,others=used.filter(c=>c!==base).sort();
+  const sig=base+'|'+others.join(',')+'|'+JSON.stringify(state.settings.fx||{});
+  const box=$('fxBox');
+  if(sig===fxSig||box.contains(document.activeElement))return;
+  fxSig=sig;
+  if(!others.length){box.innerHTML='<p class="hint">ทุกรายการเป็น '+base+' ไม่ต้องตั้งอัตราแลกเปลี่ยน</p>';return;}
+  box.innerHTML=others.map(c=>{
+    const ov=state.settings.fx&&state.settings.fx[c+'_'+base];
+    const def=(DEF_THB[c]||1)/(DEF_THB[base]||1);
+    return '<label class="f" for="fx-'+c+'"><span class="fxrow"><span>1 '+c+' =</span><input type="number" step="any" min="0" id="fx-'+c+'" data-fx="'+c+'" value="'+(ov>0?esc(ov):'')+'" placeholder="'+(def>=1?def.toFixed(2):def.toFixed(4))+'"><span>'+base+'</span></span></label>';
+  }).join('');
+}
+
+function remaining(days){
+  if(days<=0)return '';
+  if(days<31)return 'อีก '+days+' วัน';
+  const yy=Math.floor(days/365),mm=Math.floor((days%365)/30.4);
+  return 'อีก '+(yy?yy+' ปี ':'')+(mm?mm+' เดือน':'');
+}
+
+function renderHoldings(hs,all,T,calc){
+  const hv=state.holdView,V=HV[hv],inV=h=>V.types.includes(h.type);
+  hs=hs.filter(inV);all=all.filter(inV);
+  $('holdTitle').textContent=V.title;
+  $('addHold').textContent=V.add;$('addHoldPlace').textContent=V.placeBtn;
+  const base=state.settings.base;
+  const act=all.filter(h=>isActive(h,T));
+  const pr=act.reduce((s,h)=>s+h.principal*h._w,0);
+  const wr=pr>0?act.reduce((s,h)=>s+h.principal*h._w*h.rate,0)/pr:0;
+  const ny=act.reduce((s,h)=>s+nominalYear(h)*h._w,0);
+  const per={};act.forEach(h=>{per[h.ccy]=(per[h.ccy]||0)+h.principal;});
+  const perTxt=Object.keys(per).length>1?Object.keys(per).sort().map(c=>money(per[c],c)).join(' · '):'';
+  $('holdStats').innerHTML=
+    '<div class="fig"><div class="lab">เงินต้นรวม (ยังไม่ครบกำหนด)</div><div class="num">'+money(pr,base)+'</div>'+(perTxt?'<div class="sub">'+perTxt+'</div>':'')+'</div>'+
+    '<div class="fig"><div class="lab">ดอกเบี้ยเฉลี่ยถ่วงน้ำหนัก</div><div class="num">'+pct(wr)+'</div><div class="sub">ต่อปี จาก '+hs.filter(h=>isActive(h,T)).length+' รายการ</div></div>'+
+    '<div class="fig"><div class="lab">ดอกเบี้ยต่อปีโดยประมาณ</div><div class="num">'+money(ny,base)+'</div><div class="sub">หลังหักภาษีที่ระบุไว้</div></div>';
+  const storedNames=((state.settings.places&&state.settings.places[V.pk])||[]);
+  if(!hs.length&&!storedNames.length){$('list').innerHTML='<p class="empty" style="padding:14px 0">ยังไม่มี'+V.noun+' กดปุ่ม "เพิ่ม" ด้านบนเพื่อเริ่มบันทึก (จะเพิ่ม'+V.inst+'ก่อน แล้วค่อยเพิ่มรายการข้างในก็ได้)</p>';return;}
+  const cardOf=h=>{
+    const ik='i:'+h.id;
+    if(isFold(ik))return compactRow(ik,esc(h.name||TYPES[h.type]),'<span class="chip">'+h.ccy+'</span>'+(h.sample?'<span class="chip s">ตัวอย่าง</span>':''),money(h.principal+h.topups.reduce((s,t)=>s+t.a,0),h.ccy));
+    let status;
+    if(T<h._s)status='<span>ยังไม่เริ่ม · เริ่ม '+fmtDate(h._s)+'</span>';
+    else if(h._e!=null&&T>=h._e)status=h.received?'<span>ครบกำหนดแล้ว · เงินเข้าแล้ว '+fmtDate(toDay(h.received))+'</span>':'<span class="stale">ครบกำหนดแล้ว · รอเงินเข้า</span>';
+    else status='<span class="ok">กำลังได้ดอกเบี้ย</span>'+(h._e!=null?' · '+remaining(h._e-T):'');
+    const tr=calc.filter(x=>x.id===h.id);
+    const tot=h.principal+h.topups.reduce((s,t)=>s+t.a,0);
+    const nom=tr.reduce((s,x)=>s+nominalYear(x),0);
+    const life=h._e!=null?tr.reduce((s,x)=>s+cum(x,h._e,true),0):null;
+    const live=T>=h._s&&(h._e==null||T<h._e);
+    const balLine=h.compound&&live?'<div class="hm">ยอดโดยประมาณวันนี้ (รวมดอกเบี้ยที่ทบ) <b class="mono">'+money(tot+tr.reduce((s,x)=>s+cum(x,T),0),h.ccy)+'</b></div>':'';
+    const srcLine=(h.broker||h.acct)?'<div class="hm">'+(h.broker?'ซื้อกับ '+esc(h.broker):'')+(h.broker&&h.acct?' · ':'')+(h.acct?'เงินเข้า '+esc(h.acct)+(h.acctp?' (เงินต้น → '+esc(h.acctp)+')':''):'')+'</div>':'';
+    const calLine=(!h.sample&&h._e!=null&&h._e>=T)?'<div class="hm">ใส่เตือนล่วงหน้าในปฏิทิน: <a class="link" href="'+esc(calUrl(h,'g'))+'" target="_blank" rel="noopener">Google Calendar</a> · <a class="link" href="'+esc(calUrl(h,'o'))+'" target="_blank" rel="noopener">Outlook</a></div>':'';
+    const sorted=h.topups.slice().sort((a,b)=>b.day-a.day);
+    const topLine=sorted.length?'<details class="tops"'+(state.confirmTop&&state.confirmTop.indexOf(h.id+':')===0?' open':'')+'><summary>เงินเข้า-ออก '+sorted.length+' รายการ สุทธิ '+sgn(tot-h.principal)+money(Math.abs(tot-h.principal),h.ccy)+'</summary>'+
+      sorted.map(t=>'<div class="trow"><span>'+fmtDate(t.day)+'</span><span class="mono'+(t.a<0?' neg':'')+'">'+sgn(t.a)+money(Math.abs(t.a),h.ccy)+'</span>'+(t.n?'<span>'+esc(t.n)+'</span>':'')+(h.sample?'':(state.confirmTop===h.id+':'+t.d+':'+t.a
+        ?'<button class="link bad" data-act="toptok" data-id="'+esc(h.id)+'" data-d="'+t.d+'" data-a="'+t.a+'">ยืนยันลบ</button><button class="link" data-act="topdelcancel">ยกเลิก</button>'
+        :'<button class="link bad" data-act="toptdel" data-id="'+esc(h.id)+'" data-d="'+t.d+'" data-a="'+t.a+'">ลบ</button>'))+'</div>').join('')+'</details>':'';
+    const acts=h.sample?'':(state.confirmDel===h.id
+      ?'<span class="hint">ลบรายการนี้?</span><button class="link bad" data-act="delok" data-id="'+esc(h.id)+'">ยืนยันลบ</button><button class="link" data-act="delcancel">ยกเลิก</button>'
+      :(h._e!=null&&T>=h._e?(h.received?'':'<button class="link" data-act="recv" data-id="'+esc(h.id)+'">ยืนยันเงินเข้าแล้ว</button>'):'<button class="link" data-act="topup" data-kind="in" data-id="'+esc(h.id)+'">+ เติมเงิน</button><button class="link" data-act="topup" data-kind="out" data-id="'+esc(h.id)+'">− ถอนเงิน</button><button class="link" data-act="xferfrom" data-id="'+esc(h.id)+'">โยกเงิน</button>')+'<button class="link" data-act="edit" data-id="'+esc(h.id)+'">แก้ไข</button><button class="link bad" data-act="del" data-id="'+esc(h.id)+'">ลบ</button>');
+    return '<div class="hold"><div style="min-width:0"><div class="hn">'+foldBtn(ik)+esc(h.name||TYPES[h.type])+'<span class="chip">'+TYPES[h.type]+'</span><span class="chip">'+h.ccy+'</span>'+(h.sample?'<span class="chip s">ตัวอย่าง</span>':'')+'</div>'+
+      '<div class="hm">เงินต้น '+money(tot,h.ccy)+(h.topups.length?' (เริ่ม '+money(h.principal,h.ccy)+(tot>=h.principal?' + เติมสุทธิ ':' − ถอนสุทธิ ')+money(Math.abs(tot-h.principal),h.ccy)+')':'')+' · '+NF2.format(h.rate)+'% ต่อปี · '+FREQ[h.freq]+(h.compound?' · ทบต้น':'')+(h.tax>0?' · หักภาษี '+h.tax+'%':'')+'</div>'+
+      '<div class="hm">'+fmtDate(h._s)+' → '+(h._e!=null?fmtDate(h._e):'ตลอดไป')+'</div>'+srcLine+calLine+balLine+topLine+
+      '<div class="hm">'+status+'</div>'+(h.note?'<div class="hm">'+esc(h.note)+'</div>':'')+'</div>'+
+      '<div class="hr"><div class="big">'+money(nom,h.ccy)+'</div><div class="lbl">ต่อปีโดยประมาณ</div>'+
+      '<div class="lbl" style="margin-top:6px">'+(life!=null?'ตลอดสัญญา '+money(life,h.ccy):'ไม่มีวันครบกำหนด')+'</div>'+
+      '<div class="acts">'+acts+'</div></div></div>';
+  };
+  const by={};
+  const ens=k=>by[k]||(by[k]={n:0,val:0,ny:0,html:[],stored:false});
+  storedNames.forEach(k=>{ens(k).stored=true;});
+  hs.forEach(h=>{
+    const o=ens(h.broker||NOINST);o.n++;o.html.push(cardOf(h));
+    if(isActive(h,T)){const w=fx(h.ccy);o.val+=(h.principal+h.topups.reduce((s,t)=>s+t.a,0))*w;o.ny+=calc.filter(x=>x.id===h.id).reduce((s,x)=>s+nominalYear(x),0)*w;}
+  });
+  Object.keys(by).forEach(k=>{by[k].sub='เงินต้นรวม '+money(by[k].val,base)+' · ดอกเบี้ยต่อปีโดยประมาณ '+money(by[k].ny,base);});
+  const order=Object.keys(by).sort((x,y)=>by[y].val-by[x].val||x.localeCompare(y));
+  $('list').innerHTML=renderGroups(V.pk,by,order,{addAct:'add',addWord:V.noun,sample:isSample()});
+}
+
+/* ---------- form ---------- */
+function fillCcySelects(){
+  const opts=CCYS.map(c=>'<option value="'+c+'">'+c+' · '+CCY_NAME[c]+'</option>').join('');
+  $('f-ccy').innerHTML=opts;$('pn-ccy').innerHTML=opts;$('s2-ccy').innerHTML=opts;$('s-base').innerHTML=opts;$('a-ccy').innerHTML=opts;
+}
+const TYPE_OPTS={bond:[['bond','หุ้นกู้']],govt:[['govt','พันธบัตร']],deposit:[['fixed','เงินฝากประจำ'],['hy','ออมทรัพย์ดอกเบี้ยสูง'],['other','อื่นๆ']]};
+const viewOfType=t=>t==='bond'?'bond':t==='govt'?'govt':'deposit';
+function setTypeOpts(v){$('f-type').innerHTML=TYPE_OPTS[v].map(o=>'<option value="'+o[0]+'">'+o[1]+'</option>').join('');}
+function applyTypeDefaults(){
+  const d=TYPE_DEF[$('f-type').value]||TYPE_DEF.other;
+  $('f-freq').value=String(d.freq);$('f-compound').checked=d.compound;
+}
+function syncPerp(){$('f-end').disabled=$('f-perp').checked;}
+function openForm(id,place){
+  closeXfer();closeTop();const f=$('holdForm');state.editingId=id||null;
+  $('formErr').textContent='';
+  if(id){
+    const h=state.holdings.find(x=>x.id===id);if(!h)return;
+    $('formTitle').textContent='แก้ไขรายการ';
+    $('f-name').value=h.name||'';setTypeOpts(viewOfType(h.type));$('f-type').value=h.type||'other';$('f-ccy').value=h.ccy||'THB';
+    $('f-principal').value=h.principal;$('f-rate').value=h.rate;
+    $('f-start').value=h.start||'';$('f-end').value=h.end||'';$('f-perp').checked=!!h.perpetual||!h.end;
+    $('f-freq').value=String(h.freq);$('f-tax').value=h.tax||0;$('f-compound').checked=!!h.compound;$('f-note').value=h.note||'';
+    $('f-broker').value=h.broker||'';$('f-acct').value=h.acct||'';$('f-acctp').value=h.acctp||'';
+  }else{
+    $('formTitle').textContent='เพิ่ม'+HV[state.holdView].noun;
+    $('f-name').value='';setTypeOpts(state.holdView);$('f-type').value=HV[state.holdView].def;$('f-ccy').value=state.lastCcy||state.settings.base;
+    $('f-principal').value='';$('f-rate').value='';
+    $('f-start').value=isoOf(todayDay());$('f-end').value='';$('f-perp').checked=false;
+    $('f-tax').value='';$('f-note').value='';$('f-broker').value=(place&&place!==NOINST)?place:'';$('f-acct').value='';$('f-acctp').value='';applyTypeDefaults();
+  }
+  syncPerp();f.hidden=false;
+  f.scrollIntoView({block:'nearest',behavior:'smooth'});
+  $('f-name').focus({preventScroll:true});
+}
+function closeForm(){$('holdForm').hidden=true;state.editingId=null;}
+async function saveTopups(id,arr){
+  if(store&&store.kind==='db'){await store.col.doc(id).update({topups:arr,updated:Date.now()});}
+  else{const h=state.holdings.find(x=>x.id===id);if(h)h.topups=arr;saveLocal();}
+}
+/* balance of a holding (own currency) on a given day: principal and net deposits so far, plus accrued interest when it compounds */
+function balAt(h,day){
+  const ph=prep(h);if(!ph)return 0;
+  return expand([ph]).filter(x=>x._s<=day).reduce((s,x)=>s+x.principal+(x.compound?cum(x,day,true):0),0);
+}
+function openTop(id,kind){
+  const h=state.holdings.find(x=>x.id===id);if(!h)return;
+  closeForm();closeXfer();state.topId=id;
+  $('f-top-kind').value=kind||'in';
+  $('topTitle').textContent='เติม/ถอนเงิน · '+(h.name||TYPES[h.type]||'รายการนี้')+' ('+(h.ccy||'THB')+')';
+  $('f-top-amt').value='';$('f-top-date').value=isoOf(todayDay());$('topErr').textContent='';
+  const f=$('topForm');f.hidden=false;
+  f.scrollIntoView({block:'nearest',behavior:'smooth'});
+  $('f-top-amt').focus({preventScroll:true});
+}
+function closeTop(){$('topForm').hidden=true;state.topId=null;}
+async function submitTop(ev){
+  ev.preventDefault();
+  const err=m=>{$('topErr').textContent=m;};
+  const h=state.holdings.find(x=>x.id===state.topId);if(!h)return err('ไม่พบรายการนี้');
+  const amt=parseFloat($('f-top-amt').value),d=$('f-top-date').value,day=toDay(d);
+  if(!(amt>0))return err('ใส่จำนวนเงินที่มากกว่า 0');
+  if(!Number.isFinite(day))return err('เลือกวันที่ใส่เงิน');
+  if(day<toDay(h.start))return err('วันที่ต้องไม่ก่อนวันเริ่มต้นของรายการ ('+fmtDate(toDay(h.start))+')');
+  if(h.end&&!h.perpetual&&day>=toDay(h.end))return err('รายการนี้ครบกำหนดก่อนวันที่ที่เลือก');
+  const out=$('f-top-kind').value==='out';
+  if(out){
+    const bal=balAt(h,day);
+    if(amt>bal+0.005)return err('ยอดคงเหลือ ณ วันนั้นประมาณ '+money(bal,h.ccy||'THB')+' ถอนเกินยอดไม่ได้');
+  }
+  try{
+    await saveTopups(h.id,(h.topups||[]).concat([{d,a:out?-amt:amt}]));
+    closeTop();toast(out?'ถอนเงินแล้ว':'เติมเงินแล้ว');renderAll();
+  }catch(e){err('บันทึกไม่สำเร็จ บัญชีนี้อาจเปิดดูได้อย่างเดียว');}
+}
+async function submitForm(ev){
+  ev.preventDefault();
+  const err=m=>{$('formErr').textContent=m;};
+  const principal=parseFloat($('f-principal').value),rate=parseFloat($('f-rate').value);
+  const start=$('f-start').value,perp=$('f-perp').checked,end=$('f-end').value;
+  const tax=$('f-tax').value===''?0:parseFloat($('f-tax').value);
+  if(!(principal>0))return err('ใส่เงินต้นเป็นตัวเลขที่มากกว่า 0');
+  if(!(rate>=0))return err('ใส่อัตราดอกเบี้ยต่อปี เช่น 5.5');
+  if(!Number.isFinite(toDay(start)))return err('เลือกวันเริ่มต้น');
+  if(!perp){
+    if(!Number.isFinite(toDay(end)))return err('เลือกวันครบกำหนด หรือติ๊ก "ไม่มีวันครบกำหนด"');
+    if(toDay(end)<=toDay(start))return err('วันครบกำหนดต้องอยู่หลังวันเริ่มต้น');
+  }
+  if(!(tax>=0&&tax<=100))return err('ภาษีหัก ณ ที่จ่ายต้องอยู่ระหว่าง 0 ถึง 100');
+  const obj={
+    name:$('f-name').value.trim(),type:$('f-type').value,ccy:$('f-ccy').value,principal,rate,start,end:perp?'':end,perpetual:perp,
+    freq:parseInt($('f-freq').value,10),compound:$('f-compound').checked,tax,note:$('f-note').value.trim(),updated:Date.now(),
+    topups:(state.editingId&&(state.holdings.find(x=>x.id===state.editingId)||{}).topups||[],
+    received:(state.editingId&&(state.holdings.find(x=>x.id===state.editingId)||{}).received||'',
+    broker:$('f-broker').value.trim(),acct:$('f-acct').value.trim(),acctp:$('f-acctp').value.trim()
+  };
+  try{
+    await saveHolding(obj,state.editingId);
+    state.lastCcy=obj.ccy;
+    closeForm();toast('บันทึกแล้ว');renderAll();
+  }catch(e){
+    err('บันทึกไม่สำเร็จ บัญชีนี้อาจเปิดดูได้อย่างเดียว');
+  }
+}
+
+/* ---------- state pensions ---------- */
+function syncPenType(){const l=$('pn-type').value==='l';$('pn-amt-lbl').textContent=l?'ได้รับเป็นก้อน (มูลค่าเงินวันนี้)':'ได้เดือนละ (มูลค่าเงินวันนี้)';$('pn-age-lbl').textContent=l?'ได้รับตอนอายุ (ปี)':'เริ่มได้ตอนอายุ (ปี)';}
+function closePen(){const f=$('penForm');if(f)f.hidden=true;state.penEditId=null;}
+function openPen(id,country){
+  const p=id?(state.settings.pensions||[]).find(x=>x.id===id):null;if(id&&!p)return;
+  closeAllForms();state.penEditId=id||null;
+  $('penTitle').textContent=p?'แก้ไขบำนาญ':'เพิ่มบำนาญ';
+  $('pn-type').value=p&&p.kind==='l'?'l':'m';syncPenType();$('pn-name').value=p?p.name||'':'';$('pn-country').value=p?p.country||'':(country&&country!==NOINST?country:'');
+  $('pn-ccy').value=p?p.ccy||'THB':(state.lastCcy||state.settings.base);$('pn-amt').value=p?p.amt:'';$('pn-age').value=p?p.age:'';$('pn-note').value=p?p.note||'':'';$('penErr').textContent='';
+  const f=$('penForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});$('pn-name').focus({preventScroll:true});
+}
+async function submitPen(ev){
+  ev.preventDefault();
+  const err=m=>{$('penErr').textContent=m;};
+  const name=$('pn-name').value.trim(),amt=parseFloat($('pn-amt').value),age=parseFloat($('pn-age').value);
+  if(!name)return err('ใส่ชื่อบำนาญ');
+  if(!(amt>0))return err('ใส่จำนวนเงินต่อเดือนที่มากกว่า 0');
+  if(!(age>=30&&age<=110))return err('ใส่อายุที่เริ่มได้ ระหว่าง 30 ถึง 110');
+  const o={id:state.penEditId||'pn'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),name,kind:$('pn-type').value==='l'?'l':'m',country:$('pn-country').value.trim(),ccy:$('pn-ccy').value,amt,age,note:$('pn-note').value.trim()};
+  const arr=(state.settings.pensions||[]).slice(),i=arr.findIndex(x=>x.id===o.id);
+  if(i>=0)arr[i]=o;else arr.push(o);
+  state.settings.pensions=arr;state.lastCcy=o.ccy;
+  await persistSettings();closePen();toast('บันทึกแล้ว');renderAll();
+}
+async function deletePen(id){
+  state.confirmPen=null;
+  state.settings.pensions=(state.settings.pensions||[]).filter(x=>x.id!==id);
+  await persistSettings();toast('ลบแล้ว');renderAll();
+}
+function renderPension(T){
+  const base=state.settings.base,ps=state.settings.pensions||[];
+  const mon=ps.filter(p=>p.kind!=='l').reduce((s,p)=>s+(+p.amt||0)*fx(p.ccy||'THB'),0),lump=ps.filter(p=>p.kind==='l').reduce((s,p)=>s+(+p.amt||0)*fx(p.ccy||'THB'),0),ages=ps.map(p=>+p.age).filter(x=>x>0);
+  const ai=ageInfo(T);
+  $('penStats').innerHTML=
+    '<div class="fig"><div class="lab">รวมบำนาญรัฐต่อเดือน (มูลค่าเงินวันนี้)</div><div class="num">'+money(mon,base)+'</div><div class="sub">'+ps.length+' รายการ · ต่อปี '+money(mon*12,base)+'</div></div>'+(lump>0?'<div class="fig"><div class="lab">เงินก้อนที่จะได้ (บำเหน็จ)</div><div class="num">'+money(lump,base)+'</div><div class="sub">มูลค่าเงินวันนี้ นับรวมในแผนเกษียณ</div></div>':'')+
+    '<div class="fig"><div class="lab">เริ่มได้เร็วสุดตอนอายุ</div><div class="num">'+(ages.length?Math.min.apply(null,ages)+' ปี':'—')+'</div>'+(ai&&ages.length?'<div class="sub">'+(Math.min.apply(null,ages)>ai.age?'อีก '+(Math.min.apply(null,ages)-ai.age)+' ปี':'เริ่มได้แล้ว')+'</div>':'')+'</div>';
+  const countries=[...new Set(ps.map(p=>p.country).filter(Boolean))];
+  $('penCountries').innerHTML=countries.concat(((state.settings.places||{}).pen||[])).map(c=>'<option value="'+esc(c)+'"></option>').join('');
+  const stored=((state.settings.places||{}).pen||[]);
+  if(!ps.length&&!stored.length){$('penList').innerHTML='<p class="empty" style="padding:14px 0">ยังไม่มีบำนาญรัฐ กดปุ่ม "+ เพิ่มบำนาญ" เพื่อเริ่ม (ใส่ได้หลายประเทศ ถ้าไม่มีก็ข้ามหน้านี้ได้)</p>';return;}
+  const by={};const ens=k=>by[k]||(by[k]={n:0,val:0,html:[],stored:false});
+  stored.forEach(k=>{ens(k).stored=true;});
+  ps.forEach(p=>{
+    const k=p.country||NOINST,o=ens(k),ik='i:'+p.id,w=fx(p.ccy||'THB');o.n++;if(p.kind!=='l')o.val+=(+p.amt||0)*w;
+    if(isFold(ik)){o.html.push(compactRow(ik,esc(p.name),'<span class="chip">'+esc(p.ccy)+'</span>',money(p.amt,p.ccy)+(p.kind==='l'?' ก้อนเดียว':' / เดือน')));return;}
+    const acts=state.confirmPen===p.id?'<span class="hint">ลบรายการนี้?</span><button class="link bad" data-act="pendelok" data-id="'+esc(p.id)+'">ยืนยันลบ</button><button class="link" data-act="pendelcancel">ยกเลิก</button>':
+      '<button class="link" data-act="penedit" data-id="'+esc(p.id)+'">แก้ไข</button><button class="link bad" data-act="pendel" data-id="'+esc(p.id)+'">ลบ</button>';
+    o.html.push('<div class="hold"><div style="min-width:0"><div class="hn">'+foldBtn(ik)+esc(p.name)+'<span class="chip">'+esc(p.ccy)+'</span></div>'+
+      '<div class="hm">'+(p.kind==='l'?'ก้อนเดียว ได้รับตอนอายุ ':'เริ่มได้ตอนอายุ ')+p.age+' ปี'+(ai&&ai.age<p.age?' (อีก '+(p.age-ai.age)+' ปี)':'')+'</div>'+(p.ccy!==base?'<div class="hm">ประมาณ '+money((+p.amt||0)*w,base)+(p.kind==='l'?'':' ต่อเดือน')+'</div>':'')+(p.note?'<div class="hm">'+esc(p.note)+'</div>':'')+'</div>'+
+      '<div class="hr"><div class="big">'+money(p.amt,p.ccy)+'</div><div class="lbl">'+(p.kind==='l'?'ก้อนเดียว':'ต่อเดือน')+'</div><div class="acts">'+acts+'</div></div></div>');
+  });
+  Object.keys(by).forEach(k=>{by[k].sub='รวมรายเดือน '+money(by[k].val,base)+' ต่อเดือน';});
+  const order=Object.keys(by).sort((x,y)=>by[y].val-by[x].val||x.localeCompare(y));
+  $('penList').innerHTML=renderGroups('pen',by,order,{addAct:'addpen',addWord:'บำนาญ',sample:false});
+}
+
+/* ---------- insurance and lottery ---------- */
+const SKIND={i:'ดอกเบี้ย / ผลตอบแทน',p:'เงินต้นคืน'};
+function closeSS(){$('ssForm').hidden=true;state.ssEditId=null;}
+function closePay(){$('payForm').hidden=true;state.payId=null;state.payIdx=null;}
+function openSS(id,place){
+  const V=SV[state.schedView],h=id?state.holdings.find(x=>x.id===id):null;if(id&&!h)return;
+  closeAllForms();state.ssEditId=id||null;
+  $('ssTitle').textContent=(h?'แก้ไข':'เพิ่ม')+V.noun;
+  $('s2-broker-lbl').textContent=V.inst;$('s2-principal-lbl').textContent=V.amt;
+  $('s2-name').value=h?h.name||'':'';$('s2-broker').value=h?h.broker||'':(place&&place!==NOINST?place:'');
+  $('s2-ccy').value=h?h.ccy||'THB':(state.lastCcy||state.settings.base);
+  $('s2-principal').value=h?h.principal:'';$('s2-start').value=h?h.start||'':isoOf(todayDay());
+  $('s2-end').value=h?h.end||'':'';$('s2-acct').value=h?h.acct||'':'';$('s2-note').value=h?h.note||'':'';
+  const ins=state.schedView==='ins';
+  $('s2-w-prem').hidden=!ins;$('s2-w-premend').hidden=!ins;
+  $('s2-prem').value=h&&h.prem?h.prem:'';$('s2-premend').value=h?h.premEnd||'':'';
+  $('s2-build').hidden=false;$('s2-build-h').textContent=h?'เพิ่มงวดรับเงินใหม่ (แก้หรือลบงวดเดิมได้ที่ปุ่มข้างแต่ละงวดในรายการ)':'เงินที่จะได้รับ';
+  $('s2-ret-lbl').textContent=ins?'เงินที่ได้คืนตอนครบกำหนด (ถ้ามี)':'เงินต้นที่ได้คืนตอนครบกำหนด (ปกติเท่าที่ซื้อ)';
+  ['s2-ret','s2-bfirst','s2-bamt'].forEach(i=>{$(i).value='';});$('s2-bcount').value='1';$('s2-bevery').value='12';$('s2-bkind').value='i';
+  $('ssErr').textContent='';
+  const f=$('ssForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});$('s2-name').focus({preventScroll:true});
+}
+async function submitSS(ev){
+  ev.preventDefault();
+  const err=m=>{$('ssErr').textContent=m;};
+  const V=SV[state.schedView],old=state.ssEditId?state.holdings.find(x=>x.id===state.ssEditId):null;
+  const principal=$('s2-principal').value===''?NaN:parseFloat($('s2-principal').value);
+  const start=$('s2-start').value,end=$('s2-end').value;
+  if(!$('s2-name').value.trim())return err('ใส่ชื่อ');
+  if(!(principal>=0))return err('ใส่จำนวนเงินที่จ่ายไป (ใส่ 0 ได้ถ้าไม่ทราบ)');
+  if(!Number.isFinite(toDay(start)))return err('เลือกวันเริ่มต้น');
+  if(end&&(!Number.isFinite(toDay(end))||toDay(end)<=toDay(start)))return err('วันครบกำหนดต้องอยู่หลังวันเริ่มต้น');
+  let sched=old?(old.sched||[]):[];
+  {
+    const ret=$('s2-ret').value===''?0:parseFloat($('s2-ret').value);
+    if(!(ret>=0))return err('จำนวนเงินที่ได้คืนต้องไม่ติดลบ');
+    if(ret>0){if(!end)return err('ใส่วันครบกำหนด เพื่อให้รู้ว่าเงินต้นคืนวันไหน');sched.push({d:end,a:ret,k:'p'});}
+    if($('s2-bamt').value!==''||$('s2-bfirst').value!==''){
+      const amt=parseFloat($('s2-bamt').value),first=toDay($('s2-bfirst').value),cnt=parseInt($('s2-bcount').value,10),ev=parseInt($('s2-bevery').value,10);
+      if(!(amt>0))return err('ใส่จำนวนเงินต่องวด หรือเว้นว่างทั้งส่วนงวดระหว่างทาง');
+      if(!Number.isFinite(first))return err('เลือกวันที่ได้รับครั้งแรก');
+      if(!(cnt>=1&&cnt<=600))return err('จำนวนงวดต้องอยู่ระหว่าง 1 ถึง 600');
+      const anchor=dt(first).getUTCDate(),kd=$('s2-bkind').value==='p'?'p':'i';
+      for(let k=0;k<cnt;k++)sched.push({d:isoOf(addMonths(first,k*ev,anchor)),a:amt,k:kd});
+    }
+  }
+  const obj={name:$('s2-name').value.trim(),type:V.type,ccy:$('s2-ccy').value,principal,rate:0,start,end,perpetual:!end,freq:0,compound:false,tax:0,
+    note:$('s2-note').value.trim(),broker:$('s2-broker').value.trim(),acct:$('s2-acct').value.trim(),acctp:'',received:old?old.received||'':'',topups:[],
+    sched,prem:state.schedView==='ins'&&$('s2-prem').value!==''?parseFloat($('s2-prem').value)||0:0,premEnd:state.schedView==='ins'?$('s2-premend').value:'',updated:Date.now()};
+  try{await saveHolding(obj,state.ssEditId);state.lastCcy=obj.ccy;closeSS();toast('บันทึกแล้ว');renderAll();}
+  catch(e){err('บันทึกไม่สำเร็จ บัญชีนี้อาจเปิดดูได้อย่างเดียว');}
+}
+function openPay(id,kind,idx){
+  const h=state.holdings.find(x=>x.id===id);if(!h)return;
+  const row=idx!=null?(h.sched||[])[idx]:null;
+  closeAllForms();state.payId=id;state.payIdx=row?idx:null;
+  $('payTitle').textContent=(row?'แก้ไขงวดรับเงิน · ':'เพิ่มงวดรับเงิน · ')+(h.name||'');
+  $('pay-kind').value=row?(row.k==='p'?'p':'i'):(kind==='p'?'p':'i');$('pay-date').value=row?row.d:isoOf(todayDay());$('pay-amt').value=row?row.a:'';$('pay-note').value=row?row.n||'':'';$('payErr').textContent='';
+  const f=$('payForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});$('pay-amt').focus({preventScroll:true});
+}
+async function submitPay(ev){
+  ev.preventDefault();
+  const err=m=>{$('payErr').textContent=m;};
+  const h=state.holdings.find(x=>x.id===state.payId);if(!h)return err('ไม่พบรายการนี้');
+  const a=parseFloat($('pay-amt').value),d=$('pay-date').value;
+  if(!(a>0))return err('ใส่จำนวนเงินที่มากกว่า 0');
+  if(!Number.isFinite(toDay(d)))return err('เลือกวันที่');
+  const rowNew={d,a,k:$('pay-kind').value==='p'?'p':'i',n:$('pay-note').value.trim()};
+  let arr=(h.sched||[]).slice();
+  if(state.payIdx!=null&&state.payIdx<arr.length)arr[state.payIdx]=rowNew;else arr=arr.concat([rowNew]);
+  try{await patchHolding(h.id,{sched:arr,updated:Date.now()});closePay();toast('บันทึกแล้ว');renderAll();}
+  catch(e){err('บันทึกไม่สำเร็จ บัญชีนี้อาจเปิดดูได้อย่างเดียว');}
+}
+async function deleteSched(id,i){
+  state.confirmEnt=null;
+  const h=state.holdings.find(x=>x.id===id);if(!h)return;
+  const arr=(h.sched||[]).slice();arr.splice(i,1);
+  try{await patchHolding(id,{sched:arr,updated:Date.now()});toast('ลบแล้ว');}catch(e){toast('ลบไม่สำเร็จ');}
+  renderAll();
+}
+function renderSched(hsAll,T){
+  const sv=state.schedView,V=SV[sv],base=state.settings.base,ins=sv==='ins';
+  const hs=hsAll.filter(h=>h.type===V.type),sample=isSample();
+  $('schedTitle').textContent=V.title;$('addSched').textContent=V.add;$('addSchedPlace').textContent=V.placeBtn;
+  $('schedNote').textContent=sample?'ข้อมูลตัวอย่าง ตัวเลขยังไม่ใช่ของคุณ':
+    (ins?'ใส่วันและจำนวนเงินที่กรมธรรม์จะจ่ายคืน ทั้งเงินคืนระหว่างทางและเงินต้นตอนครบกำหนด ระบบจะนับเป็นดอกเบี้ย/ผลตอบแทนในหน้าสรุป และใส่เงินที่ได้ถึงวันเกษียณในแผนเกษียณ (เงินที่จะได้หลังวันเกษียณยังไม่นับ)':
+         'ใส่เงินที่ซื้อสลาก วันครบกำหนดที่ได้เงินต้นคืน และบันทึกรางวัลที่ถูกเมื่อไหร่ก็ได้ รางวัลจะนับเป็นรายได้ในหน้าสรุป');
+  let paid=0,got=0,next12=0,ret12=0;
+  hs.forEach(h=>{const w=fx(h.ccy);paid+=h.principal*w;h.sched.forEach(x=>{
+    if(x.k==='i'){if(x.day<=T)got+=x.a*w;else if(x.day<=T+365)next12+=x.a*w;}
+    else if(x.day>T&&x.day<=T+365)ret12+=x.a*w;});});
+  $('schedStats').innerHTML=
+    '<div class="fig"><div class="lab">'+V.amt+'</div><div class="num">'+money(paid,base)+'</div><div class="sub">จาก '+hs.length+' รายการ</div></div>'+
+    '<div class="fig"><div class="lab">ได้รับมาแล้ว ('+(ins?'เงินคืน/ผลตอบแทน':'รางวัล/ดอกเบี้ย')+')</div><div class="num">'+money(got,base)+'</div></div>'+
+    '<div class="fig"><div class="lab">จะได้รับใน 12 เดือนข้างหน้า</div><div class="num">'+money(next12+ret12,base)+'</div><div class="sub">ผลตอบแทน '+money(next12,base)+' · เงินต้นคืน '+money(ret12,base)+'</div></div>';
+  const stored=((state.settings.places&&state.settings.places[V.pk])||[]);
+  if(!hs.length&&!stored.length){$('schedList').innerHTML='<p class="empty" style="padding:14px 0">ยังไม่มี'+V.noun+' กดปุ่ม "เพิ่ม" ด้านบนเพื่อเริ่มบันทึก (เพิ่ม'+V.inst+'ก่อน แล้วค่อยเพิ่มรายการข้างในก็ได้)</p>';return;}
+  const cardOf=h=>{
+    const cc=h.ccy,ik='i:'+h.id;
+    const totI=h.sched.reduce((s,x)=>s+(x.k==='i'?x.a:0),0),totP=h.sched.reduce((s,x)=>s+(x.k==='p'?x.a:0),0);
+    const gotI=h.sched.reduce((s,x)=>s+(x.k==='i'&&x.day<=T?x.a:0),0);
+    if(isFold(ik))return compactRow(ik,esc(h.name),'<span class="chip">'+cc+'</span>'+(h.sample?'<span class="chip s">ตัวอย่าง</span>':''),money(h.principal,cc));
+    const nx=h.sched.find(x=>x.day>=T);
+    const rows=h.sched.map((x,i)=>({x,i})).sort((u,v)=>u.x.day-v.x.day);
+    const tl=rows.length?'<details class="tops"'+(rows.length<=4?' open':'')+'><summary>งวดรับเงิน '+rows.length+' รายการ</summary>'+rows.map(({x,i})=>{
+      const key=h.id+':s'+i,past=x.day<=T;
+      return '<div class="trow"><span>'+fmtDate(x.day)+'</span><span class="mono">'+(x.k==='p'?'เงินต้นคืน ':'+')+money(x.a,cc)+'</span><span>'+SKIND[x.k]+(past?' · ได้รับแล้ว':'')+(x.n?' · '+esc(x.n):'')+'</span>'+
+        (h.sample?'':'<button class="link" data-act="payedit" data-id="'+esc(h.id)+'" data-i="'+i+'">แก้ไข</button>'+(state.confirmEnt===key?'<button class="link bad" data-act="sdelok" data-id="'+esc(h.id)+'" data-i="'+i+'">ยืนยันลบ</button><button class="link" data-act="tdelcancel">ยกเลิก</button>':'<button class="link bad" data-act="sdel" data-id="'+esc(h.id)+'" data-i="'+i+'">ลบ</button>'))+'</div>';
+    }).join('')+'</details>':'';
+    const acts=h.sample?'':(state.confirmDel===h.id
+      ?'<span class="hint">ลบรายการนี้?</span><button class="link bad" data-act="delok" data-id="'+esc(h.id)+'">ยืนยันลบ</button><button class="link" data-act="delcancel">ยกเลิก</button>'
+      :'<button class="link" data-act="payadd" data-id="'+esc(h.id)+'" data-kind="i">'+(ins?'+ เพิ่มงวดรับเงิน':'+ บันทึกรางวัล')+'</button><button class="link" data-act="payadd" data-id="'+esc(h.id)+'" data-kind="p">+ เงินต้นคืน</button>'+
+       (h._e!=null&&T>=h._e&&!h.received?'<button class="link" data-act="recv" data-id="'+esc(h.id)+'">ยืนยันเงินเข้าแล้ว</button>':'')+
+       '<button class="link" data-act="editss" data-id="'+esc(h.id)+'">แก้ไข</button><button class="link bad" data-act="del" data-id="'+esc(h.id)+'">ลบ</button>');
+    return '<div class="hold"><div style="min-width:0"><div class="hn">'+foldBtn(ik)+esc(h.name)+'<span class="chip">'+cc+'</span>'+(h.sample?'<span class="chip s">ตัวอย่าง</span>':'')+'</div>'+
+      '<div class="hm">'+V.amt+' '+money(h.principal,cc)+(ins&&h.prem>0?' · เบี้ยปีละ '+money(h.prem,cc)+(h.premEnd?' จ่ายถึง '+fmtDate(toDay(h.premEnd)):''):'')+'</div>'+
+      '<div class="hm">'+fmtDate(h._s)+' → '+(h._e!=null?fmtDate(h._e):'ไม่ระบุวันครบกำหนด')+(h._e!=null&&T<h._e?' · '+remaining(h._e-T):'')+'</div>'+
+      '<div class="hm">เงินต้นคืนรวม <b class="mono">'+money(totP,cc)+'</b>'+(h.sched.filter(x=>x.k==='p').length?' ('+h.sched.filter(x=>x.k==='p').map(x=>fmtDate(x.day)).join(', ')+')':' (ยังไม่ได้ใส่)')+'</div>'+
+      '<div class="hm">ผลตอบแทนทั้งหมด <b class="mono">'+money(totI,cc)+'</b> · ได้รับแล้ว '+money(gotI,cc)+' · เหลืออีก '+money(totI-gotI,cc)+'</div>'+
+      (nx?'<div class="hm">งวดถัดไป '+fmtDate(nx.day)+' · '+(nx.k==='p'?'เงินต้นคืน ':'+')+money(nx.a,cc)+(h.acct?' · เข้า '+esc(h.acct):'')+'</div>':'<div class="hm">ไม่มีงวดที่ยังไม่ถึง</div>')+
+      (h.note?'<div class="hm">'+esc(h.note)+'</div>':'')+tl+'</div>'+
+      '<div class="hr"><div class="big">'+money(totI+totP,cc)+'</div><div class="lbl">รวมที่จะได้ตลอดสัญญา</div>'+
+      (h.principal>0?'<div class="pl '+plc(totI+totP-h.principal)+'">'+sgn(totI+totP-h.principal)+money(Math.abs(totI+totP-h.principal),cc)+' ('+pctTxt(totI+totP-h.principal,h.principal)+')</div>':'')+
+      '<div class="acts">'+acts+'</div></div></div>';
+  };
+  const by={};const ens=k=>by[k]||(by[k]={n:0,val:0,html:[],stored:false});
+  stored.forEach(k=>{ens(k).stored=true;});
+  hs.forEach(h=>{const o=ens(h.broker||NOINST);o.n++;o.html.push(cardOf(h));o.val+=h.principal*fx(h.ccy);});
+  Object.keys(by).forEach(k=>{by[k].sub=V.amt+'รวม '+money(by[k].val,base);});
+  const order=Object.keys(by).sort((x,y)=>by[y].val-by[x].val||x.localeCompare(y));
+  $('schedList').innerHTML=renderGroups(V.pk,by,order,{addAct:'addss',addWord:V.noun,sample:sample});
+}
+
+/* ---------- transfers, reminders, assets ---------- */
+let LAST=null;
+function closeAllForms(){closePen();closeForm();closeTop();closeXfer();closeAsset();closeTrade();closePlace();closeSS();closePay();}
+async function patchHolding(id,obj){
+  if(store&&store.kind==='db'){await store.col.doc(id).update(obj);}
+  else{const h=state.holdings.find(x=>x.id===id);if(h)Object.assign(h,obj);saveLocal();}
+}
+function closeXfer(){$('xferForm').hidden=true;}
+function xferInfo(){return {f:state.holdings.find(h=>h.id===$('x-from').value),t:state.holdings.find(h=>h.id===$('x-to').value)};}
+function xHint(){
+  const x=xferInfo(),f=x.f,t=x.t;if(!f||!t)return;
+  const fc=f.ccy||'THB',tc=t.ccy||'THB';
+  $('x-out-ccy').textContent='('+fc+')';$('x-in-ccy').textContent='('+tc+')';
+  $('x-w-in').hidden=fc===tc;$('x-out-lbl').textContent=fc===tc?'จำนวนที่โยก':'จำนวนที่ออกจากต้นทาง';
+  const o=parseFloat($('x-out').value);
+  if(!state.xinTouched)$('x-in').value=o>0?(fc===tc?o:+(o*fx(fc)/fx(tc)).toFixed(2)):'';
+  const day=toDay($('x-date').value);
+  $('xHint').textContent=(fc===tc?'':'ต่างสกุลเงิน ระบบใส่ยอดที่เข้าให้ตามอัตราแลกเปลี่ยนที่ตั้งไว้ แก้เป็นยอดที่ได้รับจริงได้ ')+
+    (Number.isFinite(day)?'ยอดคงเหลือของต้นทาง ณ วันนั้นประมาณ '+money(balAt(f,day),fc):'');
+}
+function openXfer(fromId){
+  const T=todayDay();
+  const hs=state.holdings.map(h=>({h,p:prep(h)})).filter(x=>x.p&&!x.p.ss&&(x.p._e==null||x.p._e>T));
+  if(hs.length<2){toast('ต้องมีอย่างน้อย 2 รายการที่ยังไม่ครบกำหนด ถึงจะโยกเงินได้');return;}
+  closeAllForms();
+  const opts=hs.map(x=>'<option value="'+esc(x.h.id)+'">'+esc(x.p.name||TYPES[x.p.type])+' ('+x.p.ccy+')</option>').join('');
+  $('x-from').innerHTML=opts;$('x-to').innerHTML=opts;
+  const fi=Math.max(0,hs.findIndex(x=>x.h.id===fromId));$('x-from').selectedIndex=fi;$('x-to').selectedIndex=fi===0?1:0;
+  $('x-out').value='';$('x-in').value='';state.xinTouched=false;$('x-date').value=isoOf(T);$('xErr').textContent='';
+  xHint();
+  const f=$('xferForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});$('x-out').focus({preventScroll:true});
+}
+async function submitXfer(ev){
+  ev.preventDefault();
+  const err=m=>{$('xErr').textContent=m;};
+  const x=xferInfo(),f=x.f,t=x.t;
+  if(!f||!t)return err('เลือกรายการต้นทางและปลายทาง');
+  if(f.id===t.id)return err('ต้นทางกับปลายทางต้องเป็นคนละรายการ');
+  const o=parseFloat($('x-out').value),d=$('x-date').value,day=toDay(d);
+  const i=(f.ccy||'THB')===(t.ccy||'THB')?o:parseFloat($('x-in').value);
+  if(!(o>0)||!(i>0))return err('ใส่จำนวนเงินที่โยกให้มากกว่า 0');
+  if(!Number.isFinite(day))return err('เลือกวันที่โยก');
+  for(const h of [f,t]){
+    if(day<toDay(h.start))return err('วันที่ต้องไม่ก่อนวันเริ่มต้นของ '+(h.name||TYPES[h.type])+' ('+fmtDate(toDay(h.start))+')');
+    if(h.end&&!h.perpetual&&day>=toDay(h.end))return err((h.name||TYPES[h.type])+' ครบกำหนดก่อนวันที่ที่เลือก');
+  }
+  const bal=balAt(f,day);
+  if(o>bal+0.005)return err('ยอดคงเหลือของต้นทาง ณ วันนั้นประมาณ '+money(bal,f.ccy||'THB')+' โยกเกินไม่ได้');
+  const fo=f.topups||[],to=t.topups||[];
+  try{
+    await saveTopups(f.id,fo.concat([{d,a:-o,n:'โยกไป '+(t.name||TYPES[t.type])}]));
+    try{await saveTopups(t.id,to.concat([{d,a:i,n:'โยกจาก '+(f.name||TYPES[f.type])}]));}
+    catch(e2){await saveTopups(f.id,fo).catch(()=>{});throw e2;}
+    closeXfer();toast('โยกเงินแล้ว');renderAll();
+  }catch(e){err('บันทึกไม่สำเร็จ ยังไม่มีการเปลี่ยนแปลงยอดเงิน');}
+}
+
+function renderAlerts(hs,T){
+  const lead=Math.round(clamp(state.settings.lead,0,365,30)),rows=[];
+  hs.forEach(h=>{
+    if(h.sample||h._e==null)return;
+    const d=h._e-T,nm=esc(h.name||TYPES[h.type]),to=h.acctp||h.acct;
+    const tot=h.principal+h.topups.reduce((s,t)=>s+t.a,0);
+    const meta=(h.broker?' · ซื้อกับ '+esc(h.broker):'');
+    if(d>=0&&d<=lead)rows.push({k:d,c:'',h:'<b>'+nm+'</b> ครบกำหนด'+(d===0?'วันนี้':'ในอีก '+d+' วัน')+' ('+fmtDate(h._e)+') ถึงเวลาหาตัวใหม่ · เงินต้น '+money(tot,h.ccy)+(to?' จะเข้า '+esc(to):'')+meta});
+    else if(d<0&&d>=-90&&!h.received)rows.push({k:d,c:' wait',h:'<b>'+nm+'</b> ครบกำหนดมา '+(-d)+' วันแล้ว รอเงินต้นและดอกเบี้ยเข้า'+(to?' '+esc(to):'')+' · พอเงินเข้าแล้วกด "ยืนยันเงินเข้าแล้ว" ในหน้าหุ้นกู้หรือบัญชีเงินฝาก'+meta});
+  });
+  rows.sort((a,b)=>a.k-b.k);
+  $('alerts').innerHTML=rows.map(r=>'<div class="alertrow'+r.c+'" role="status">'+r.h+'</div>').join('');
+}
+async function exportCal(){
+  const T=todayDay(),lead=Math.round(clamp(state.settings.lead,0,365,30));
+  const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
+  const mdy=day=>{const d=dt(day);return String(d.getUTCMonth()+1).padStart(2,'0')+'/'+String(d.getUTCDate()).padStart(2,'0')+'/'+d.getUTCFullYear();};
+  const rows=[['Subject','Start Date','All Day Event','Description']];
+  list(T).filter(h=>!h.sample&&h._e!=null&&h._e>=T).forEach(h=>{
+    const nm=h.name||TYPES[h.type],to=h.acctp||h.acct;
+    const tot=h.principal+h.topups.reduce((s,t)=>s+t.a,0);
+    const info=[h.broker?'ซื้อกับ '+h.broker:'',to?'เงินเข้า '+to:'','ครบกำหนด '+fmtDate(h._e),'เงินต้น '+money(tot,h.ccy)].filter(Boolean).join(' | ');
+    rows.push(['หาตัวใหม่แทน '+nm+' (ครบกำหนดอีก '+lead+' วัน)',mdy(Math.max(T,h._e-lead)),'True',info]);
+    rows.push([nm+' ครบกำหนดวันนี้ รอเงินต้นและดอกเบี้ยเข้าบัญชี',mdy(h._e),'True',info]);
+    rows.push(['เช็คว่าเงินจาก '+nm+' เข้าบัญชีแล้วหรือยัง',mdy(h._e+3),'True',info]);
+  });
+  if(rows.length===1){toast('ยังไม่มีรายการที่มีวันครบกำหนดในอนาคต');return;}
+  let dl=null;
+  try{dl=window.claude&&window.claude.use?await window.claude.use('downloads'):null;}catch(e){}
+  if(!dl){toast('มุมมองนี้บันทึกไฟล์ไม่ได้ ลองเปิดหน้านี้ในเบราว์เซอร์หรือแอป Claude');return;}
+  try{
+    await dl.save({filename:'bond-maturity-reminders.csv',data:'﻿'+rows.map(r=>r.map(q).join(',')).join('\r\n')});
+    toast('บันทึกไฟล์แล้ว นำเข้า Google Calendar ได้เลย');
+  }catch(e){if(!e||e.code!=='declined')toast('บันทึกไฟล์ไม่สำเร็จ');}
+}
+
+/* ----- stocks, funds, gold ----- */
+const KINDS={stock:'หุ้น',fund:'กองทุน',gold:'ทอง'};
+function sampleAssets(T){
+  const a=dt(T).getUTCDate();
+  const m=k=>isoOf(addMonths(T,-k,a));
+  return [
+    {id:'sa1',sample:true,name:'หุ้นตัวอย่าง A',kind:'stock',ccy:'THB',unit:'หุ้น',broker:'บล. ตัวอย่าง',acct:'ธนาคารตัวอย่าง เลขท้าย 1234',price:48.5,priceDate:isoOf(T-2),
+      trades:[{d:m(14),t:'buy',q:1000,p:42,fee:60,src:'บล. ตัวอย่าง'},{d:m(4),t:'div',a:850}]},
+    {id:'sa2',sample:true,name:'กองทุนตัวอย่าง (CAD)',kind:'fund',ccy:'CAD',unit:'หน่วย',broker:'บลจ. ตัวอย่าง',price:12.4,priceDate:isoOf(T-1),
+      trades:[{d:m(9),t:'buy',q:500,p:11.2,fee:0,src:'บลจ. ตัวอย่าง'}]},
+    {id:'sa3',sample:true,name:'ทองคำตัวอย่าง',kind:'gold',ccy:'THB',unit:'บาททอง',broker:'ร้านทอง A',price:65000,priceDate:isoOf(T-3),
+      trades:[{d:m(11),t:'buy',q:2,p:62000,fee:0,src:'ร้านทอง A'},{d:m(7),t:'buy',q:1,p:63500,fee:0,src:'ร้านทอง B'},{d:m(2),t:'buy',q:0.5,p:64200,fee:0,src:'ออมทองในแอป C'}]},
+    {id:'sa4',sample:true,mode:'sum',name:'กองทุนรวมตัวอย่าง (สรุปเป็นเงิน)',kind:'fund',ccy:'THB',broker:'บลจ. ตัวอย่าง',value:88000,valueDate:isoOf(T-4),
+      trades:[{d:m(12),t:'in',a:50000},{d:m(3),t:'in',a:30000}]}
+  ];
+}
+function listAssets(T){return assetsSample()?sampleAssets(T):state.assets;}
+/* units held on `day`; src given = only that place (blank string = trades with no place) */
+function unitsAt(a,day,src){
+  let u=0;
+  (a.trades||[]).forEach(t=>{
+    if(src!==undefined&&(t.src||'')!==src)return;
+    if(toDay(t.d)<=day){if(t.t==='buy')u+=t.q;else if(t.t==='sell')u-=t.q;}
+  });
+  return u;
+}
+function validUnits(a){
+  const tr=a.trades||[];
+  const srcs=[...new Set(tr.filter(t=>t.t==='buy'||t.t==='sell').map(t=>t.src||''))];
+  return srcs.every(s=>tr.every(t=>unitsAt(a,toDay(t.d),s)>=-1e-9));
+}
+function assetCalc(a,T){
+  if(a.mode==='sum'){
+    let inn=0,out=0,div=0,div12=0;
+    (a.trades||[]).forEach(t=>{
+      const day=toDay(t.d);
+      if(t.t==='in')inn+=t.a;else if(t.t==='out')out+=t.a;
+      else if(t.t==='div'){div+=t.a;if(day>T-365&&day<=T)div12+=t.a;}
+    });
+    const val=+a.value||0,un=val+out-inn;
+    return {sum:true,inn,out,u:0,cost:Math.max(0,inn-out),val,unreal:un,pct:inn>0?un/inn*100:0,real:0,div,div12,price:0,avg:0,
+      stale:a.valueDate&&Number.isFinite(toDay(a.valueDate))?T-toDay(a.valueDate):null};
+  }
+  const tr=(a.trades||[]).slice().sort((x,y)=>(toDay(x.d)-toDay(y.d))||((x.t==='buy'?0:1)-(y.t==='buy'?0:1)));
+  let u=0,cost=0,real=0,div=0,div12=0;
+  for(const t of tr){
+    const day=toDay(t.d);
+    if(t.t==='buy'){cost+=t.q*t.p+(t.fee||0);u+=t.q;}
+    else if(t.t==='sell'){const avg=u>0?cost/u:0;real+=t.q*t.p-(t.fee||0)-avg*t.q;cost-=avg*t.q;u-=t.q;}
+    else if(t.t==='div'){div+=t.a;if(day>T-365&&day<=T)div12+=t.a;}
+  }
+  if(u<1e-9){u=0;cost=0;}
+  const price=+a.price||0,val=u*price;
+  return {u,cost,val,unreal:val-cost,pct:cost>0?(val-cost)/cost*100:0,real,div,div12,price,avg:u>0?cost/u:0,
+    stale:a.priceDate&&Number.isFinite(toDay(a.priceDate))?T-toDay(a.priceDate):null};
+}
+/* how much of one asset sits at each place it was bought */
+function srcBreakdown(a,T){
+  if(a.mode==='sum'){const c=assetCalc(a,T);return [{src:a.broker||a.name,u:null,cost:c.cost,val:c.val,unreal:c.unreal}];}
+  const by={};
+  (a.trades||[]).filter(t=>t.t==='buy'||t.t==='sell').forEach(t=>{const k=t.src||a.broker||'ไม่ระบุที่';(by[k]||(by[k]=[])).push(t);});
+  return Object.keys(by).map(k=>{
+    const c=assetCalc({price:a.price,priceDate:a.priceDate,trades:by[k]},T);
+    return {src:k,u:c.u,cost:c.cost,val:c.val,unreal:c.unreal};
+  }).filter(r=>r.u>1e-9);
+}
+async function saveAsset(obj,id){
+  if(store&&store.kind==='db'){const ref=id?store.acol.doc(id):store.acol.doc();await ref.set(obj);}
+  else{
+    if(id){const i=state.assets.findIndex(x=>x.id===id);if(i>=0)state.assets[i]=Object.assign({id},obj);}
+    else state.assets.push(Object.assign({id:'a'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)},obj));
+    saveLocal();
+  }
+}
+async function patchAsset(id,obj){
+  if(store&&store.kind==='db'){await store.acol.doc(id).update(Object.assign({updated:Date.now()},obj));}
+  else{const a=state.assets.find(x=>x.id===id);if(a)Object.assign(a,obj);saveLocal();}
+}
+async function removeAsset(id){
+  if(store&&store.kind==='db'){await store.acol.doc(id).delete();}
+  else{state.assets=state.assets.filter(x=>x.id!==id);saveLocal();}
+}
+function closePlace(){const f=$('placeForm');if(f)f.hidden=true;}
+function openPlace(){
+  closeAllForms();
+  const L=PLACE_LBL[placeKey()]||PLACE_LBL.gold;
+  $('placeFormTitle').textContent=L[0];$('p-lbl').textContent=L[1];
+  $('p-name').value='';$('pErr').textContent='';
+  const f=$('placeForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});$('p-name').focus({preventScroll:true});
+}
+async function submitPlace(ev){
+  ev.preventDefault();
+  const n=$('p-name').value.trim();if(!n){$('pErr').textContent='ใส่ชื่อ';return;}
+  const pl=state.settings.places||(state.settings.places={}),k=placeKey();
+  pl[k]=pl[k]||[];
+  if(pl[k].includes(n)){$('pErr').textContent='มีชื่อนี้แล้ว';return;}
+  pl[k].push(n);
+  try{await persistSettings();}catch(e){}
+  closePlace();toast('เพิ่มแล้ว กดปุ่ม "เพิ่ม ... ที่นี่" เพื่อใส่รายการข้างใน');renderAll();
+}
+async function delPlace(n){
+  state.confirmPlace=null;const k=placeKey(),pl=state.settings.places||{};
+  pl[k]=(pl[k]||[]).filter(x=>x!==n);
+  try{await persistSettings();}catch(e){}
+  toast('ลบแล้ว');renderAll();
+}
+function closeAsset(){$('assetForm').hidden=true;state.assetEditId=null;}
+function closeTrade(){$('tradeForm').hidden=true;state.tradeId=null;}
+function setKindOpts(g){$('a-kind').innerHTML=(g==='gold'?[['gold','ทอง']]:[['fund','กองทุน'],['stock','หุ้น']]).map(o=>'<option value="'+o[0]+'">'+o[1]+'</option>').join('');}
+function syncAssetMode(){
+  const sum=$('a-mode').value==='sum';
+  $('a-w-unit').hidden=sum;
+  $('a-price-lbl').textContent=sum?'มูลค่าปัจจุบันรวม':'ราคาล่าสุดต่อหน่วย';
+  $('a-fqty-lbl').textContent=sum?'เงินที่ลงทุนครั้งแรก':'จำนวนที่ซื้อ';
+  $('a-w-fprice').hidden=sum;$('a-w-ffee').hidden=sum;
+}
+function openAsset(id,place){
+  const a=id?state.assets.find(x=>x.id===id):null;if(id&&!a)return;
+  closeAllForms();state.assetEditId=id||null;
+  $('assetFormTitle').textContent=a?'แก้ไขสินทรัพย์':'เพิ่มสินทรัพย์';
+  $('a-mode').value=a&&a.mode==='sum'?'sum':'units';$('a-mode').disabled=!!a;
+  $('a-name').value=a?a.name||'':'';setKindOpts(a?(a.kind==='gold'?'gold':'funds'):state.assetView);$('a-kind').value=a?a.kind||'stock':(state.assetView==='gold'?'gold':'fund');
+  $('a-ccy').value=a?a.ccy||'THB':(state.lastCcy||state.settings.base);
+  $('a-unit').value=a?a.unit||'':({stock:'หุ้น',fund:'หน่วย',gold:'บาททอง'}[$('a-kind').value]||'');
+  const pv=a?(a.mode==='sum'?a.value:a.price):'';$('a-price').value=pv?pv:'';
+  $('a-broker').value=a?a.broker||'':(place&&place!=='ไม่ระบุที่'?place:'');$('a-acct').value=a?a.acct||'':'';$('aErr').textContent='';
+  $('a-first').hidden=!!a;$('a-fdate').value=isoOf(todayDay());['a-fqty','a-fprice','a-ffee'].forEach(i=>{$(i).value='';});
+  syncAssetMode();
+  const f=$('assetForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});$('a-name').focus({preventScroll:true});
+}
+async function submitAsset(ev){
+  ev.preventDefault();
+  const err=m=>{$('aErr').textContent=m;};
+  const name=$('a-name').value.trim();if(!name)return err('ใส่ชื่อหรือสัญลักษณ์');
+  const old=state.assetEditId?state.assets.find(x=>x.id===state.assetEditId):null;
+  const mode=old?(old.mode==='sum'?'sum':'units'):($('a-mode').value==='sum'?'sum':'units'),sum=mode==='sum';
+  const pr=$('a-price').value===''?0:parseFloat($('a-price').value);
+  if(!(pr>=0))return err(sum?'มูลค่าต้องไม่ติดลบ':'ราคาต้องไม่ติดลบ');
+  const broker=$('a-broker').value.trim();
+  let first=null,fp=0,fd='';
+  if(!old&&($('a-fqty').value!==''||(!sum&&$('a-fprice').value!==''))){
+    const q=parseFloat($('a-fqty').value),fee=$('a-ffee').value===''?0:parseFloat($('a-ffee').value);
+    fd=$('a-fdate').value;
+    if(!(q>0))return err(sum?'ใส่จำนวนเงินที่ลงทุน หรือเว้นว่างทั้งส่วน "ซื้อครั้งแรก"':'ใส่จำนวนที่ซื้อ หรือเว้นว่างทั้งส่วน "ซื้อครั้งแรก"');
+    if(!sum){
+      fp=parseFloat($('a-fprice').value);
+      if($('a-fprice').value===''||!(fp>=0))return err('ใส่ราคาที่ซื้อต่อหน่วย');
+      if(!(fee>=0))return err('ค่าธรรมเนียมต้องไม่ติดลบ');
+    }
+    if(!Number.isFinite(toDay(fd)))return err('เลือกวันที่ซื้อ');
+    if(toDay(fd)>todayDay())return err('วันที่ซื้อต้องไม่เป็นอนาคต');
+    first=sum?{d:fd,t:'in',a:q,n:''}:{d:fd,t:'buy',q,p:fp,fee,n:'',src:broker};
+  }
+  const today=isoOf(todayDay());
+  const obj={name,kind:$('a-kind').value,ccy:$('a-ccy').value,mode,unit:sum?'':($('a-unit').value.trim()||'หน่วย'),
+    broker,acct:$('a-acct').value.trim(),trades:old?(old.trades||[]):[],updated:Date.now()};
+  if(sum){obj.value=pr;obj.valueDate=(old&&old.value===pr&&old.valueDate)?old.valueDate:(pr>0?today:'');}
+  else{obj.price=pr;obj.priceDate=(old&&old.price===pr&&old.priceDate)?old.priceDate:(pr>0?today:'');}
+  try{
+    if(first){
+      obj.trades=[first];
+      if(sum){if(!(obj.value>0)){obj.value=first.a;obj.valueDate=fd;}}
+      else if(!(obj.price>0)){obj.price=fp;obj.priceDate=fd;}
+    }
+    await saveAsset(obj,state.assetEditId);state.lastCcy=obj.ccy;
+    closeAsset();toast('บันทึกแล้ว');renderAll();
+  }catch(e){err('บันทึกไม่สำเร็จ บัญชีนี้อาจเปิดดูได้อย่างเดียว');}
+}
+const TTYPE={
+  units:[['buy','ซื้อเข้า'],['sell','ขายออก'],['div','รับเงินปันผล'],['price','อัปเดตราคาล่าสุด']],
+  sum:[['in','ลงเงินเพิ่ม'],['out','ถอน / ขายออก (รับเงินคืน)'],['div','รับเงินปันผล'],['price','อัปเดตมูลค่าปัจจุบัน']]
+};
+function syncTradeFields(){
+  const a=state.assets.find(x=>x.id===state.tradeId),sum=!!(a&&a.mode==='sum'),ty=$('t-type').value;
+  const ut=!sum&&(ty==='buy'||ty==='sell');
+  $('t-w-qty').hidden=!ut;$('t-w-fee').hidden=!ut;$('t-w-src').hidden=!ut;
+  $('t-w-amt').hidden=!(sum?(ty==='in'||ty==='out'||ty==='div'):ty==='div');
+  $('t-w-price').hidden=!(ut||ty==='price');
+  $('t-amt-lbl').textContent=ty==='div'?'เงินปันผลที่ได้รับ':ty==='out'?'จำนวนเงินที่ได้รับคืน':'จำนวนเงินที่ลงทุนเพิ่ม';
+  $('t-price-lbl').textContent=ty==='price'?(sum?'มูลค่าปัจจุบันรวม':'ราคาล่าสุดต่อหน่วย'):'ราคาต่อหน่วย';
+  $('t-src-lbl').textContent=ty==='sell'?'ขายจากที่ไหน':'ซื้อกับที่ไหน (ร้านทอง / บล. / แอป)';
+  $('t-date-lbl').textContent={buy:'วันที่ซื้อ',sell:'วันที่ขาย',div:'วันที่รับปันผล',price:'วันที่ของราคา/มูลค่านี้',in:'วันที่ลงเงิน',out:'วันที่ถอน'}[ty]||'วันที่';
+}
+function openTrade(id,type,place){
+  const a=state.assets.find(x=>x.id===id);if(!a)return;
+  closeAllForms();state.tradeId=id;
+  const sum=a.mode==='sum',opts=TTYPE[sum?'sum':'units'];
+  $('t-type').innerHTML=opts.map(o=>'<option value="'+o[0]+'">'+o[1]+'</option>').join('');
+  $('t-type').value=opts.some(o=>o[0]===type)?type:opts[0][0];
+  $('tradeTitle').textContent=(a.name||'สินทรัพย์')+' ('+(a.ccy||'THB')+')';
+  $('t-date').value=isoOf(todayDay());
+  ['t-qty','t-fee','t-amt','t-note'].forEach(i=>{$(i).value='';});
+  const cur=sum?a.value:a.price;
+  $('t-price').value=($('t-type').value==='price'||$('t-type').value==='sell')&&cur?cur:'';
+  const srcs=[...new Set((a.trades||[]).filter(t=>t.src).map(t=>t.src).concat(a.broker?[a.broker]:[]))];
+  $('srcList').innerHTML=srcs.map(s=>'<option value="'+esc(s)+'"></option>').join('');
+  const lastBuy=(a.trades||[]).filter(t=>t.t==='buy'&&t.src).slice(-1)[0];
+  $('t-src').value=place&&place!=='ไม่ระบุที่'?place:(lastBuy?lastBuy.src:(a.broker||''));
+  $('tErr').textContent='';syncTradeFields();
+  const f=$('tradeForm');f.hidden=false;f.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+async function submitTrade(ev){
+  ev.preventDefault();
+  const err=m=>{$('tErr').textContent=m;};
+  const a=state.assets.find(x=>x.id===state.tradeId);if(!a)return err('ไม่พบสินทรัพย์นี้');
+  const sum=a.mode==='sum',ty=$('t-type').value,d=$('t-date').value,day=toDay(d),note=$('t-note').value.trim();
+  if(!Number.isFinite(day))return err('เลือกวันที่');
+  if(day>todayDay())return err('วันที่ต้องไม่เป็นอนาคต');
+  try{
+    if(ty==='price'){
+      const p=parseFloat($('t-price').value);
+      if($('t-price').value===''||!(p>=0))return err(sum?'ใส่มูลค่าปัจจุบันรวม':'ใส่ราคาล่าสุด');
+      const pd=sum?a.valueDate:a.priceDate;
+      if(pd&&day<toDay(pd))return err('มีข้อมูลที่ใหม่กว่านี้อยู่แล้ว (วันที่ '+fmtDate(toDay(pd))+')');
+      await patchAsset(a.id,sum?{value:p,valueDate:d}:{price:p,priceDate:d});toast(sum?'อัปเดตมูลค่าแล้ว':'อัปเดตราคาแล้ว');
+    }else if(ty==='div'){
+      const am=parseFloat($('t-amt').value);
+      if(!(am>0))return err('ใส่จำนวนเงินปันผล');
+      await patchAsset(a.id,{trades:(a.trades||[]).concat([{d,t:'div',a:am,n:note}])});toast('บันทึกปันผลแล้ว');
+    }else if(sum){
+      const am=parseFloat($('t-amt').value);
+      if(!(am>0))return err('ใส่จำนวนเงินให้มากกว่า 0');
+      await patchAsset(a.id,{trades:(a.trades||[]).concat([{d,t:ty,a:am,n:note}])});toast(ty==='in'?'บันทึกเงินลงทุนแล้ว':'บันทึกการถอนแล้ว');
+    }else{
+      const q=parseFloat($('t-qty').value),p=parseFloat($('t-price').value),fee=$('t-fee').value===''?0:parseFloat($('t-fee').value),src=$('t-src').value.trim();
+      if(!(q>0))return err('ใส่จำนวนที่ซื้อหรือขายให้มากกว่า 0');
+      if($('t-price').value===''||!(p>=0))return err('ใส่ราคาต่อหน่วย');
+      if(!(fee>=0))return err('ค่าธรรมเนียมต้องไม่ติดลบ');
+      const trades=(a.trades||[]).concat([{d,t:ty,q,p,fee,n:note,src}]);
+      if(ty==='sell'&&!validUnits(Object.assign({},a,{trades})))
+        return err('ที่ "'+(src||'ไม่ระบุที่')+'" ถือไม่พอให้ขาย ณ วันนั้น (ถืออยู่ '+fmtQ(unitsAt(a,day,src))+' '+(a.unit||'หน่วย')+')');
+      const patch={trades};
+      if(!a.priceDate||day>=toDay(a.priceDate)){patch.price=p;patch.priceDate=d;}
+      await patchAsset(a.id,patch);toast(ty==='buy'?'บันทึกการซื้อแล้ว':'บันทึกการขายแล้ว');
+    }
+    closeTrade();renderAll();
+  }catch(e){err('บันทึกไม่สำเร็จ บัญชีนี้อาจเปิดดูได้อย่างเดียว');}
+}
+async function deleteTrade(id,i){
+  state.confirmEnt=null;
+  const a=state.assets.find(x=>x.id===id);if(!a)return;
+  const arr=(a.trades||[]).slice();arr.splice(i,1);
+  if(!validUnits(Object.assign({},a,{trades:arr}))){toast('ลบไม่ได้ เพราะรายการขายหลังจากนั้นจะเกินจำนวนที่ถือ');renderAll();return;}
+  try{await patchAsset(id,{trades:arr});toast('ลบแล้ว');}catch(e){toast('ลบไม่สำเร็จ');}
+  renderAll();
+}
+const plc=n=>n>=0?'pos':'neg';
+const pctTxt=(u,c)=>c>0?sgn(u)+NF2.format(Math.abs(u)/c*100)+'%':'—';
+function renderAssets(T){
+  const base=state.settings.base,sample=assetsSample(),list=listAssets(T);
+  const gv=state.assetView==='gold';
+  const rows=list.map(a=>({a,c:assetCalc(a,T),w:fx(a.ccy||'THB')})).filter(r=>gv?r.a.kind==='gold':r.a.kind!=='gold');
+  $('assetTitle').textContent=gv?'ทอง':'กองทุนและหุ้น';
+  $('addAssetPlace').textContent=gv?'+ เพิ่มแอป / ร้านทอง':'+ เพิ่มบลจ. / บล. / แอป';
+  let V=0,C=0,U=0,D=0;rows.forEach(r=>{V+=r.c.val*r.w;C+=r.c.cost*r.w;U+=r.c.unreal*r.w;D+=r.c.div12*r.w;});
+  $('assetNote').textContent=sample?'ข้อมูลตัวอย่าง ตัวเลขยังไม่ใช่ของคุณ เพิ่มสินทรัพย์แรกแล้วตัวอย่างจะหายไป':
+    'ราคาและมูลค่าล่าสุดต้องใส่เองทุกครั้ง หน้านี้ดึงราคาตลาดไม่ได้ ดูวันที่อัปเดตกำกับไว้ในแต่ละรายการ';
+  $('assetStats').innerHTML=
+    '<div class="fig"><div class="lab">มูลค่าตลาดรวม</div><div class="num">'+money(V,base)+'</div><div class="sub">ตามราคาล่าสุดที่ใส่ไว้ แปลงเป็น '+base+'</div></div>'+
+    '<div class="fig"><div class="lab">เงินลงทุนสุทธิ (ต้นทุน)</div><div class="num">'+money(C,base)+'</div></div>'+
+    '<div class="fig"><div class="lab">กำไรขาดทุนที่ยังไม่รับรู้</div><div class="num '+plc(U)+'">'+sgn(U)+money(Math.abs(U),base)+'</div><div class="sub">'+pctTxt(U,C)+'</div></div>'+
+    '<div class="fig"><div class="lab">เงินปันผล 12 เดือนที่ผ่านมา</div><div class="num">'+money(D,base)+'</div></div>';
+  const codes=[...new Set(rows.map(r=>r.a.ccy||'THB'))].sort((x,y)=>(x===base?-1:y===base?1:x.localeCompare(y)));
+  let body=codes.map(k=>{
+    const g=rows.filter(r=>(r.a.ccy||'THB')===k);
+    const v=g.reduce((s,r)=>s+r.c.val,0),c=g.reduce((s,r)=>s+r.c.cost,0),u=g.reduce((s,r)=>s+r.c.unreal,0),dv=g.reduce((s,r)=>s+r.c.div12,0);
+    return '<tr><td>'+k+'<small>'+CCY_NAME[k]+'</small></td><td class="mono">'+money(v,k)+'</td><td class="mono">'+money(c,k)+'</td><td class="mono '+plc(u)+'">'+sgn(u)+money(Math.abs(u),k)+'</td><td class="mono '+plc(u)+'">'+pctTxt(u,c)+'</td><td class="mono gold">'+money(dv,k)+'</td></tr>';
+  }).join('');
+  if(codes.length>1)body+='<tr class="total"><td>รวม<small>แปลงเป็น '+base+'</small></td><td class="mono">'+money(V,base)+'</td><td class="mono">'+money(C,base)+'</td><td class="mono '+plc(U)+'">'+sgn(U)+money(Math.abs(U),base)+'</td><td class="mono '+plc(U)+'">'+pctTxt(U,C)+'</td><td class="mono gold">'+money(D,base)+'</td></tr>';
+  $('assetByCcy').innerHTML='<table><thead><tr><th>สกุลเงิน</th><th>มูลค่าตลาด</th><th>ต้นทุน</th><th>กำไรขาดทุน</th><th>%</th><th>ปันผล 12 เดือน</th></tr></thead><tbody>'+body+'</tbody></table>';
+
+  /* place first, then the items held at that place */
+  const gk=gv?'gold':'funds',NOPLACE='ไม่ระบุที่';
+  const byPlace={};
+  const ensure=k=>byPlace[k]||(byPlace[k]={name:k,val:0,items:[],stored:false});
+  ((state.settings.places&&state.settings.places[gk])||[]).forEach(k=>{ensure(k).stored=true;});
+  rows.forEach(r=>{
+    const a=r.a,sum=r.c.sum;
+    let es=sum?[{src:a.broker||NOPLACE,u:null,cost:r.c.cost,val:r.c.val,unreal:r.c.unreal}]:srcBreakdown(a,T);
+    if(!es.length)es=[{src:a.broker||NOPLACE,u:0,cost:0,val:0,unreal:0}];
+    es.forEach(g=>{const o=ensure(g.src);o.val+=g.val*r.w;o.items.push({r,g});});
+  });
+  const placeNames=Object.keys(byPlace).sort((x,y)=>byPlace[y].val-byPlace[x].val||x.localeCompare(y));
+  const addWord=gv?'ทอง':'กองทุน / หุ้น';
+  const itemHtml=(r,g,place)=>{
+    const a=r.a,c=r.c,cc=a.ccy||'THB',sum=!!c.sum,unit=esc(a.unit||'หน่วย'),stale=c.stale!=null&&c.stale>7;
+    const dstr=sum?a.valueDate:a.priceDate;
+    const idx=(a.trades||[]).map((t,i)=>({t,i})).filter(x=>sum||x.t.t==='div'||(x.t.src||a.broker||NOPLACE)===place||x.t.t==='price').sort((x,y)=>toDay(y.t.d)-toDay(x.t.d));
+    const tl=idx.length?'<details class="tops"'+(idx.length<=3?' open':'')+'><summary>ประวัติ '+idx.length+' รายการ</summary>'+idx.map(({t,i})=>{
+      const fee=t.fee?' (ค่าธรรมเนียม '+money(t.fee,cc,true)+')':'';
+      const txt=t.t==='buy'?'ซื้อ '+fmtQ(t.q)+' × '+money(t.p,cc,true)+fee:
+        t.t==='sell'?'ขาย '+fmtQ(t.q)+' × '+money(t.p,cc,true)+fee:
+        t.t==='in'?'ลงเงินเพิ่ม +'+money(t.a,cc,true):t.t==='out'?'ถอน/ขายออก −'+money(t.a,cc,true):'ปันผล +'+money(t.a,cc,true);
+      const key=a.id+':'+i;
+      return '<div class="trow"><span>'+fmtDate(toDay(t.d))+'</span><span>'+txt+'</span>'+(t.n?'<span>'+esc(t.n)+'</span>':'')+(a.sample?'':(state.confirmEnt===key
+        ?'<button class="link bad" data-act="tdelok" data-id="'+esc(a.id)+'" data-i="'+i+'">ยืนยันลบ</button><button class="link" data-act="tdelcancel">ยกเลิก</button>'
+        :'<button class="link bad" data-act="tdel" data-id="'+esc(a.id)+'" data-i="'+i+'">ลบ</button>'))+'</div>';
+    }).join('')+'</details>':'';
+    const acts=a.sample?'':(state.confirmAsset===a.id
+      ?'<span class="hint">ลบรายการนี้และประวัติทั้งหมด?</span><button class="link bad" data-act="adelok" data-id="'+esc(a.id)+'">ยืนยันลบ</button><button class="link" data-act="adelcancel">ยกเลิก</button>'
+      :(sum?['in:+ ลงเงินเพิ่ม','out:− ถอนออก','div:ปันผล','price:อัปเดตมูลค่า']:['buy:+ ซื้อ','sell:− ขาย','div:ปันผล','price:อัปเดตราคา']).map(x=>{const q=x.split(':');return '<button class="link" data-act="trade" data-type="'+q[0]+'" data-id="'+esc(a.id)+'" data-place="'+esc(place)+'">'+q[1]+'</button>';}).join('')+
+        '<button class="link" data-act="editasset" data-id="'+esc(a.id)+'">แก้ไข</button><button class="link bad" data-act="adel" data-id="'+esc(a.id)+'">ลบ</button>');
+    const l1=sum?'ลงเงินสุทธิ '+money(g.cost,cc)+(c.out>0?' · ถอนแล้ว '+money(c.out,cc):''):
+      'ถือ <b>'+fmtQ(g.u)+' '+unit+'</b>'+(g.u>0?' · ต้นทุนเฉลี่ย '+money(g.cost/g.u,cc,true)+' ต่อหน่วย':'');
+    const l2=(sum?(c.val>0?'มูลค่าล่าสุด '+money(c.val,cc):'ยังไม่ได้ใส่มูลค่า'):(c.price>0?'ราคาล่าสุด '+money(c.price,cc,true):'ยังไม่ได้ใส่ราคา'))+
+      (dstr?' (อัปเดต '+fmtDate(toDay(dstr))+(stale?' · <span class="stale">เก่า '+c.stale+' วัน</span>':'')+')':'');
+    const pl=g.cost>0?'<div class="pl '+plc(g.unreal)+'">'+sgn(g.unreal)+money(Math.abs(g.unreal),cc)+' ('+pctTxt(g.unreal,g.cost)+')</div>':'';
+    return '<div class="hold"><div style="min-width:0"><div class="hn">'+esc(a.name)+'<span class="chip">'+cc+'</span>'+(sum?'<span class="chip">สรุปเป็นเงิน</span>':'')+(a.sample?'<span class="chip s">ตัวอย่าง</span>':'')+'</div>'+
+      '<div class="hm">'+l1+'</div><div class="hm">'+l2+'</div>'+
+      (a.acct?'<div class="hm">เงินขายและปันผลเข้า '+esc(a.acct)+'</div>':'')+
+      (c.div>0?'<div class="hm">ปันผลรวม '+money(c.div,cc)+'</div>':'')+tl+'</div>'+
+      '<div class="hr"><div class="big">'+money(g.val,cc)+'</div><div class="lbl">มูลค่าที่ที่นี่</div>'+pl+'<div class="acts">'+acts+'</div></div></div>';
+  };
+  Object.keys(byPlace).forEach(k=>{const o=byPlace[k];o.n=o.items.length;o.html=o.items.map(({r,g})=>itemHtml(r,g,k));o.sub='รวม '+money(o.val,base)+(V>0&&o.val>0?' · '+NF2.format(o.val/V*100)+'% ของทั้งหมด':'');});
+  $('assetBySrc')&&($('assetBySrc').innerHTML='');
+  $('assetList').innerHTML=placeNames.length?renderGroups(gk,byPlace,placeNames,{addAct:'addasset',addWord:addWord,sample:assetsSample()}):
+    '<p class="empty" style="padding:14px 0">ยังไม่มี'+(gv?'แอปหรือร้านทอง':'บลจ. บล. หรือแอป')+' กดปุ่ม "เพิ่ม" ด้านบนเพื่อเริ่มจากชื่อที่ซื้อก่อน แล้วค่อยใส่'+addWord+'ข้างใน</p>';
+}
+function calUrl(h,kind){
+  const T=todayDay(),lead=Math.round(clamp(state.settings.lead,0,365,30));
+  const day=Math.max(T,h._e-lead),nx=day+1;
+  const title='หาตัวใหม่แทน '+(h.name||TYPES[h.type])+' (ครบกำหนด '+fmtDate(h._e)+')';
+  const tot=h.principal+h.topups.reduce((s,t)=>s+t.a,0),to=h.acctp||h.acct;
+  const body=[h.broker?'ซื้อกับ '+h.broker:'',to?'เงินเข้า '+to:'','เงินต้น '+money(tot,h.ccy)].filter(Boolean).join(' | ');
+  const c8=d=>isoOf(d).replace(/-/g,'');
+  if(kind==='g')return 'https://calendar.google.com/calendar/render?action=TEMPLATE&text='+encodeURIComponent(title)+'&dates='+c8(day)+'/'+c8(nx)+'&details='+encodeURIComponent(body);
+  return 'https://outlook.live.com/calendar/deeplink/compose?path=/calendar/action/compose&rru=addevent&startdt='+isoOf(day)+'&enddt='+isoOf(nx)+'&allday=true&subject='+encodeURIComponent(title)+'&body='+encodeURIComponent(body);
+}
+function mktRate(){const s=state.settings,c=s.mktCase||'base';return c==='none'?null:(c==='low'?+s.mktLow:c==='high'?+s.mktHigh:+s.mktBase);}
+function assetFutureBase(day,T){
+  const r=mktRate();if(r==null)return 0;const y=Math.max(0,(day-T)/365);
+  return listAssets(T).reduce((x,a)=>x+assetCalc(a,T).val*Math.pow(1+r/100,y)*fx(a.ccy||'THB'),0);
+}
+function renderScen(T){
+  const s=state.settings,L=LAST,el=$('scenTbl');
+  if(!L){el.innerHTML='<p class="empty">กรอกข้อมูลในหัวข้อวางแผนด้านบนให้ครบก่อน</p>';$('scenNote').textContent='';return;}
+  const V=listAssets(T).reduce((x,a)=>x+assetCalc(a,T).val*fx(a.ccy||'THB'),0);
+  const ny=(L.Rday-T)/365,base=s.base,td=L.f>0?' (มูลค่าเงินวันนี้)':'';
+  const cases=[{k:'ไม่นับหุ้น กองทุน ทอง',r:null},{k:'กรณีแย่',r:s.mktLow},{k:'กรณีกลาง',r:s.mktBase},{k:'กรณีดี',r:s.mktHigh}];
+  const body=cases.map(cs=>{
+    const Av=cs.r==null?0:V*Math.pow(1+cs.r/100,ny),W=L.Wn+Av;
+    const c=retireCalc({W,g:L.g,f:L.f,n:L.n,N:L.N,S:L.S,pv:L.pv});
+    let st='—';
+    if(L.S>0)st=c.gap<=0?'<span class="status ok">พอ</span> เหลือ '+money(c.left,base):'<span class="status no">ขาด</span> '+money(c.gap,base)+' · เก็บเพิ่มเดือนละ '+money(L.n>0?c.monthly:c.gap,base);
+    return '<tr><td>'+cs.k+'</td><td class="mono">'+(cs.r==null?'—':NF2.format(cs.r)+'%')+'</td><td class="mono">'+money(Av,base)+'</td><td class="mono">'+money(W,base)+'</td><td class="mono gold">'+money(c.sustain,base)+'</td><td>'+st+'</td></tr>';
+  }).join('');
+  el.innerHTML='<table><thead><tr><th>กรณี</th><th>ผลตอบแทนต่อปี</th><th>หุ้น/กองทุน/ทอง ตอนอายุ '+L.retAge+'</th><th>เงินรวมตอนอายุ '+L.retAge+'</th><th>ใช้ได้เดือนละ'+td+'</th><th>เทียบเป้า '+money(L.S,base)+' ต่อเดือน'+td+'</th></tr></thead><tbody>'+body+'</tbody></table>';
+  $('scenNote').textContent='มูลค่าตลาดวันนี้ของหุ้น กองทุน ทอง รวม '+money(V,base)+' ผลตอบแทนที่ตั้งไว้คือผลตอบแทนรวมรวมปันผลแล้ว และไม่นับเงินที่จะซื้อเพิ่มในอนาคต ราคาจริงขึ้นลงได้ทั้งสองทาง กรณีแย่ไม่ใช่กรณีที่แย่ที่สุด';
+}
+
+/* ---------- ui plumbing ---------- */
+function toast(m){
+  const t=$('toast');t.textContent=m;t.classList.add('on');
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('on'),2400);
+}
+const TABS=['summary','deposits','bonds','govt','insurance','lottery','funds','gold','pension','retire'];
+const SECTION={summary:'summary',deposits:'holdings',bonds:'holdings',govt:'holdings',insurance:'sched',lottery:'sched',funds:'assets',gold:'assets',pension:'pension',retire:'retire'};
+const ALIAS={holdings:'deposits',assets:'gold'};
+function showTab(tab){
+  tab=ALIAS[tab]||tab;
+  if(!TABS.includes(tab))tab='summary';
+  if(state.tab!==tab)closeAllForms();
+  state.tab=tab;
+  if(tab==='bonds')state.holdView='bond';else if(tab==='deposits')state.holdView='deposit';else if(tab==='govt')state.holdView='govt';
+  if(tab==='insurance')state.schedView='ins';else if(tab==='lottery')state.schedView='lot';
+  if(tab==='gold')state.assetView='gold';else if(tab==='funds')state.assetView='funds';
+  ['summary','holdings','sched','assets','pension','retire'].forEach(k=>{$('tab-'+k).hidden=k!==SECTION[tab];});
+  TABS.forEach(k=>$('tabbtn-'+k).setAttribute('aria-selected',String(k===tab)));
+  renderAll();
+}
+function go(tab){showTab(tab);if(location.hash!=='#'+tab)location.hash=tab;}
+let retOpened=false;
+function syncSettings(){
+  if(!retOpened&&!state.settings.birth&&$('retSettings')){$('retSettings').open=true;retOpened=true;}
+  const s=state.settings,set=(id,v)=>{const el=$(id);if(document.activeElement!==el)el.value=v;};
+  set('s-birth',s.birth||'');set('s-retire',s.targetAge||60);set('s-life',s.lifeAge||85);
+  set('s-spend',s.spend==null?'':s.spend);set('s-infl',s.infl||0);set('s-rate',s.retRate>0?s.retRate:'');
+  set('s-base',CCYS.includes(s.base)?s.base:'THB');set('s-step',s.step||10);
+  set('s-mlow',s.mktLow==null?0:s.mktLow);set('s-mbase',s.mktBase==null?4:s.mktBase);set('s-mhigh',s.mktHigh==null?8:s.mktHigh);
+  set('s-lead',s.lead==null?30:s.lead);set('s-mcase',s.mktCase||'base');
+  $('s-ro').checked=!!s.rollover;
+}
+const clamp=(v,lo,hi,d)=>{v=+v;return Number.isFinite(v)?Math.min(hi,Math.max(lo,v)):d;};
+function onSettings(){
+  const s=state.settings,oldBase=s.base;
+  s.birth=$('s-birth').value;
+  s.targetAge=Math.round(clamp($('s-retire').value,1,120,60));
+  s.lifeAge=Math.round(clamp($('s-life').value,1,130,85));
+  s.spend=clamp($('s-spend').value,0,1e12,0);
+  s.infl=clamp($('s-infl').value,0,30,0);
+  s.retRate=$('s-rate').value===''?0:clamp($('s-rate').value,0,30,0);
+  s.base=$('s-base').value||'THB';
+  s.step=Math.round(clamp($('s-step').value,1,30,10));
+  s.mktLow=clamp($('s-mlow').value,-50,50,0);s.mktBase=clamp($('s-mbase').value,-50,50,4);s.mktHigh=clamp($('s-mhigh').value,-50,50,8);
+  s.lead=Math.round(clamp($('s-lead').value,0,365,30));
+  s.mktCase=['none','low','base','high'].includes($('s-mcase').value)?$('s-mcase').value:'base';
+  s.rollover=$('s-ro').checked;
+  if(s.base!==oldBase)state.scope='ALL';
+  persistSettings();renderAll();
+}
+function onFx(e){
+  const el=e.target.closest('[data-fx]');if(!el)return;
+  const key=el.dataset.fx+'_'+state.settings.base;
+  if(!state.settings.fx)state.settings.fx={};
+  const v=parseFloat(el.value);
+  if(v>0)state.settings.fx[key]=v;else delete state.settings.fx[key];
+  persistSettings();renderAll();
+}
+
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAllForms();});
+document.addEventListener('click',e=>{
+  const t=e.target.closest('[data-act]');if(!t)return;
+  const a=t.dataset.act;
+  if(a==='tab')go(t.dataset.tab);
+  else if(a==='mode'){state.mode=t.dataset.mode;renderAll();}
+  else if(a==='yprev'){state.year--;state.sel=null;renderAll();}
+  else if(a==='ynext'){state.year++;state.sel=null;renderAll();}
+  else if(a==='bar'){const m=+t.dataset.m;state.sel=state.sel===m?null:m;renderAll();}
+  else if(a==='add'){go(['deposits','bonds','govt'].includes(state.tab)?state.tab:'deposits');openForm(null,t.dataset.place);}
+  else if(a==='addasset'){openAsset(null,t.dataset.place);}
+  else if(a==='addplace'){openPlace();}
+  else if(a==='cancelplace'){closePlace();}
+  else if(a==='addss'){openSS(null,t.dataset.place);}
+  else if(a==='editss'){openSS(t.dataset.id);}
+  else if(a==='cancelss'){closeSS();}
+  else if(a==='payadd'){openPay(t.dataset.id,t.dataset.kind);}
+  else if(a==='cancelpay'){closePay();}
+  else if(a==='payedit'){openPay(t.dataset.id,null,+t.dataset.i);}
+  else if(a==='sdel'){state.confirmEnt=t.dataset.id+':s'+t.dataset.i;renderAll();}
+  else if(a==='sdelok'){deleteSched(t.dataset.id,+t.dataset.i);}
+  else if(a==='yspan'){state.ySpan=+t.dataset.n||10;renderAll();}
+  else if(a==='user'){switchUser(+t.dataset.u);}
+  else if(a==='addpen'){go('pension');openPen(null,t.dataset.place);}
+  else if(a==='penedit'){openPen(t.dataset.id);}
+  else if(a==='cancelpen'){closePen();}
+  else if(a==='pendel'){state.confirmPen=t.dataset.id;renderAll();}
+  else if(a==='pendelcancel'){state.confirmPen=null;renderAll();}
+  else if(a==='pendelok'){deletePen(t.dataset.id);}
+  else if(a==='fold'){const k=t.dataset.k;state.fold[k]=!isFold(k);renderAll();}
+  else if(a==='foldall'){state.foldDef=t.dataset.v==='closed'?'closed':'open';state.fold={};renderAll();}
+  else if(a==='edit'){openForm(t.dataset.id);}
+  else if(a==='cancelform'){closeForm();}
+  else if(a==='topup'){openTop(t.dataset.id,t.dataset.kind);}
+  else if(a==='xfer'){openXfer();}
+  else if(a==='xferfrom'){openXfer(t.dataset.id);}
+  else if(a==='cancelx'){closeXfer();}
+  else if(a==='recv'){patchHolding(t.dataset.id,{received:isoOf(todayDay())}).then(()=>{toast('บันทึกว่าเงินเข้าแล้ว');renderAll();}).catch(()=>toast('บันทึกไม่สำเร็จ'));}
+  else if(a==='expcal'){exportCal();}
+  else if(a==='pdel'){state.confirmPlace=t.dataset.place;renderAll();}
+  else if(a==='pdelcancel'){state.confirmPlace=null;renderAll();}
+  else if(a==='pdelok'){delPlace(t.dataset.place);}
+  else if(a==='editasset'){openAsset(t.dataset.id);}
+  else if(a==='cancelasset'){closeAsset();}
+  else if(a==='adel'){state.confirmAsset=t.dataset.id;renderAll();}
+  else if(a==='adelcancel'){state.confirmAsset=null;renderAll();}
+  else if(a==='adelok'){const id=t.dataset.id;state.confirmAsset=null;removeAsset(id).then(()=>{toast('ลบแล้ว');renderAll();}).catch(()=>toast('ลบไม่สำเร็จ'));}
+  else if(a==='trade'){openTrade(t.dataset.id,t.dataset.type,t.dataset.place);}
+  else if(a==='canceltrade'){closeTrade();}
+  else if(a==='tdel'){state.confirmEnt=t.dataset.id+':'+t.dataset.i;renderAll();}
+  else if(a==='tdelcancel'){state.confirmEnt=null;renderAll();}
+  else if(a==='tdelok'){deleteTrade(t.dataset.id,+t.dataset.i);}
+  else if(a==='canceltop'){closeTop();}
+  else if(a==='toptdel'){state.confirmTop=t.dataset.id+':'+t.dataset.d+':'+t.dataset.a;renderAll();}
+  else if(a==='topdelcancel'){state.confirmTop=null;renderAll();}
+  else if(a==='toptok'){
+    const id=t.dataset.id,h=state.holdings.find(x=>x.id===id);state.confirmTop=null;
+    if(h){
+      const arr=(h.topups||[]).slice(),i=arr.findIndex(x=>x.d===t.dataset.d&&String(x.a)===t.dataset.a);
+      if(i>=0)arr.splice(i,1);
+      saveTopups(id,arr).then(()=>{toast('ลบแล้ว');renderAll();}).catch(()=>toast('ลบไม่สำเร็จ'));
+    }
+  }
+  else if(a==='del'){state.confirmDel=t.dataset.id;clearTimeout(delTimer);delTimer=setTimeout(()=>{state.confirmDel=null;renderAll();},5000);renderAll();}
+  else if(a==='delcancel'){state.confirmDel=null;renderAll();}
+  else if(a==='delok'){
+    const id=t.dataset.id;state.confirmDel=null;
+    removeHolding(id).then(()=>{toast('ลบแล้ว');renderAll();}).catch(()=>toast('ลบไม่สำเร็จ'));
+  }
+});
+document.addEventListener('keydown',e=>{
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches&&e.target.matches('[data-act="bar"]')){e.preventDefault();e.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}
+});
+$('holdForm').addEventListener('submit',submitForm);
+$('topForm').addEventListener('submit',submitTop);
+$('xferForm').addEventListener('submit',submitXfer);
+$('assetForm').addEventListener('submit',submitAsset);
+$('placeForm').addEventListener('submit',submitPlace);
+$('ssForm').addEventListener('submit',submitSS);
+$('penForm').addEventListener('submit',submitPen);
+$('pn-type').addEventListener('change',syncPenType);
+$('payForm').addEventListener('submit',submitPay);
+$('tradeForm').addEventListener('submit',submitTrade);
+$('t-type').addEventListener('change',syncTradeFields);
+$('a-mode').addEventListener('change',syncAssetMode);
+$('a-kind').addEventListener('change',()=>{if(!state.assetEditId)$('a-unit').value={stock:'หุ้น',fund:'หน่วย',gold:'บาททอง'}[$('a-kind').value]||'';});
+['x-from','x-to','x-date'].forEach(id=>$(id).addEventListener('change',xHint));
+$('x-out').addEventListener('input',xHint);
+$('x-in').addEventListener('input',()=>{state.xinTouched=true;});
+$('f-perp').addEventListener('change',syncPerp);
+$('f-type').addEventListener('change',()=>{if(!state.editingId)applyTypeDefaults();});
+$('scope').addEventListener('change',()=>{state.scope=$('scope').value;renderAll();});
+['s-birth','s-retire','s-life','s-spend','s-infl','s-rate','s-base','s-step','s-ro','s-mlow','s-mbase','s-mhigh','s-lead','s-mcase'].forEach(id=>$(id).addEventListener('change',onSettings));
+$('fxBox').addEventListener('change',onFx);
+window.addEventListener('hashchange',()=>showTab(location.hash.slice(1)));
+
+fillCcySelects();
+showTab(location.hash.slice(1));
+syncSettings();
+init();
+})();
+</script>
+
+</body></html>
