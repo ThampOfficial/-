@@ -708,7 +708,7 @@ a.link{display:inline-block}
 (function(){
 'use strict';
 
-const API_URL = "https://script.google.com/macros/s/AKfycbw4hc28ZZKC--2VriGnXtmx7Tk09eJHhqLhX-UMjHKWYWrWYjqTcX-xMA88xAafigoLpQ/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbw1OY1iOBBg2aZQvvsNt247OF0QYsGhuBT5Fcmx1rNyZrgSlIy8vpvuozANCZdICt1afw/exec";
 
 /*CORE-START*/
 const DAY=86400000;
@@ -888,12 +888,12 @@ const isActive=(h,T)=>h._e==null||h._e>T;
 async function loadFromSheet(){
   try{
     toast('กำลังดึงข้อมูลจาก Google Sheet...');
-    let res = await fetch(API_URL + "?action=getData");
+    let res = await fetch(API_URL + "?action=getData&profile=" + state.profile);
     let data = await res.json();
     if(data.status === "success"){
       state.holdings = data.holdings || [];
       state.assets = data.assets || [];
-      if(data.settings) Object.assign(state.settings, data.settings);
+      if(data.settings) state.settings = Object.assign(defaultSettings(), data.settings);
       state.confirmed = true;
       toast('โหลดข้อมูลสำเร็จ');
     }
@@ -901,6 +901,7 @@ async function loadFromSheet(){
     toast('ดึงข้อมูลจาก Google Sheet ไม่สำเร็จ');
     loadLocal();
   }
+  syncSettings();
   renderAll();
 }
 
@@ -909,7 +910,12 @@ async function saveToSheet(tabName, itemData){
     toast('กำลังบันทึกลง Google Sheet...');
     let res = await fetch(API_URL, {
       method: 'POST',
-      body: JSON.stringify({ action: 'saveData', tab: tabName, data: itemData })
+      body: JSON.stringify({ 
+        action: 'saveData', 
+        tab: tabName, 
+        data: itemData,
+        profile: state.profile 
+      })
     });
     let result = await res.json();
     if(result.status === 'success'){
